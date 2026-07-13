@@ -10,10 +10,14 @@
 #include <QObject>
 #include <QPoint>
 #include <QRect>
+#include <QTemporaryDir>
 #include <QTimer>
 
 namespace vpet
 {
+
+class TtsClient;
+class TtsAudioPlayer;
 
 /**
  * @brief 桌宠控制器
@@ -169,11 +173,31 @@ signals:
      */
     void SayStarted(const QString &groupName);
 
+    /**
+     * @brief Say 台词文本已就绪信号
+     *
+     * 当 Say 触发后选中台词文本时发射，用于通知聊天气泡窗口显示。
+     *
+     * @param[in] text 台词文本
+     */
+    void SayTextReady(const QString &text);
+
 private slots:
     /**
      * @brief 定时更新槽
      */
     void OnUpdate();
+
+    /**
+     * @brief TTS 合成完成后的处理槽
+     * @param[in] filePath 合成后的音频文件路径
+     */
+    void OnTtsSynthesisFinished(const QString &filePath);
+
+    /**
+     * @brief 音频播放完成后的处理槽
+     */
+    void OnAudioPlaybackFinished();
 
 private:
     /**
@@ -222,6 +246,11 @@ private:
     HIT_TYPE m_pendingHitType;                  ///< 按下时记录的命中类型，用于区分点击
     PET_STATE m_lastState;                      ///< 上一帧状态，用于检测状态变化
     QSize m_frameSize;                          ///< 当前帧尺寸
+    TtsClient *m_ttsClient;                     ///< TTS 客户端
+    TtsAudioPlayer *m_ttsAudioPlayer;           ///< TTS 音频播放器
+    QTemporaryDir m_tempDir;                    ///< 临时目录，存放合成的音频文件
+    QString m_currentSayText;                   ///< 当前 Say 台词文本
+    bool m_sayTextShown;                        ///< 当前 Say 周期是否已显示气泡
 };
 
 } // namespace vpet

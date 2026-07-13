@@ -1,6 +1,12 @@
 #include "vpet/pet_controller.h"
+#include "vpet/say_dialog.h"
+#include "vpet/tts_client.h"
+#include "vpet/tts_audio_player.h"
 
+#include <QCoreApplication>
 #include <QCursor>
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
 #include <QRandomGenerator>
 #include <QScreen>
@@ -36,6 +42,11 @@ PetController::PetController(const QString &animationBasePath, QObject *parent)
     , m_pendingHitType(HIT_TYPE::NONE)
     , m_lastState(PET_STATE::IDLE)
     , m_frameSize(100, 100)
+    , m_ttsClient(nullptr)
+    , m_ttsAudioPlayer(nullptr)
+    , m_tempDir()
+    , m_currentSayText()
+    , m_sayTextShown(false)
 {
 }
 
@@ -49,6 +60,41 @@ bool PetController::Initialize()
     m_stateMachine.Initialize();
     m_lastState = m_stateMachine.GetCurrentState();
 
+    // 初始化 TTS 客户端
+    m_ttsClient = new TtsClient(this);
+
+    // 优先查找可执行文件同目录下的配置文件，其次查找工作目录
+    const QString exeDirPath = QCoreApplication::applicationDirPath()
+                               + QStringLiteral("/tts_config.json");
+
+    const QString workDirPath = QStringLiteral("tts_config.json");
+
+    QString ttsConfigPath = QString();
+
+    if (QFile::exists(exeDirPath))
+    {
+        ttsConfigPath = exeDirPath;
+    }
+    else if (QFile::exists(workDirPath))
+    {
+        ttsConfigPath = workDirPath;
+    }
+
+    if (!ttsConfigPath.isEmpty())
+    {
+        m_ttsClient->LoadConfig(ttsConfigPath);
+    }
+
+    connect(m_ttsClient, &TtsClient::SynthesisFinished,
+            this, &PetController::OnTtsSynthesisFinished);
+
+    // 初始化 TTS 音频播放器
+    m_ttsAudioPlayer = new TtsAudioPlayer(this);
+
+    connect(m_ttsAudioPlayer, &TtsAudioPlayer::PlaybackFinished,
+            this, &PetController::OnAudioPlaybackFinished);
+
+    // 初始化更新定时器
     m_updateTimer = new QTimer(this);
     m_updateTimer->setInterval(UPDATE_INTERVAL_MS);
 
@@ -225,7 +271,33 @@ void PetController::OnUpdate()
 
         if (currentState == PET_STATE::SAYING)
         {
-            emit SayStarted(m_stateMachine.GetCurrentClipName());
+            const QString clipName = m_stateMachine.GetCurrentClipName();
+            emit SayStarted(clipName);
+
+            // 选中台词文本并立即显示气泡
+            m_currentSayText = SayDialog::GetRandomText(clipName);
+            m_sayTextShown = false;
+
+            if (!m_currentSayText.isEmpty())
+            {
+                m_sayTextShown = true;
+                emit SayTextReady(m_currentSayText);
+            }
+
+            // 触发 TTS 合成
+            if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured())
+            {
+                const QString tempWavPath = m_tempDir.filePath(
+                    QStringLiteral("say_output.wav"));
+
+                m_ttsClient->Synthesize(m_currentSayText, tempWavPath);
+            }
+        }
+        else
+        {
+            // 离开 SAYING 状态时清理
+            m_currentSayText.clear();
+            m_sayTextShown = false;
         }
     }
 
@@ -358,6 +430,40 @@ void PetController::ClampPositionToScreen(QPoint &position) const
     {
         position.setY(m_screenBounds.bottom() - m_frameSize.height());
     }
+}
+
+void PetController::OnTtsSynthesisFinished(const QString &filePath)
+{
+    // 检查参数有效性
+    if (filePath.isEmpty())
+    {
+        return;
+    }
+
+    if (m_ttsAudioPlayer == nullptr)
+    {
+        return;
+    }
+
+    // 仅当宠物仍在 SAYING 状态时播放音频
+    if (m_stateMachine.GetCurrentState() != PET_STATE::SAYING)
+    {
+        return;
+    }
+
+    m_ttsAudioPlayer->Play(filePath);
+
+    // 如果此前因 TTS 延迟未显示气泡，补充显示
+    if (!m_sayTextShown && !m_currentSayText.isEmpty())
+    {
+        m_sayTextShown = true;
+        emit SayTextReady(m_currentSayText);
+    }
+}
+
+void PetController::OnAudioPlaybackFinished()
+{
+    // 播放完成后可在此处扩展后续逻辑
 }
 
 } // namespace vpet

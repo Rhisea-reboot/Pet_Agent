@@ -10,10 +10,13 @@
 namespace vpet
 {
 
+class ChatBubbleWindow;
+
 /**
  * @brief 桌宠主窗口
  *
- * 透明无边框置顶窗口，负责渲染当前帧、显示气泡、转发鼠标事件。
+ * 透明无边框置顶窗口，负责渲染当前帧、显示气泡、转发鼠标事件，
+ * 以及管理聊天气泡窗口的生命周期。
  */
 class MainWindow : public QWidget
 {
@@ -92,6 +95,15 @@ private slots:
      */
     void OnSayStarted(const QString &groupName);
 
+    /**
+     * @brief Say 台词文本就绪槽
+     *
+     * 收到台词文本后显示聊天气泡窗口。
+     *
+     * @param[in] text 台词文本
+     */
+    void OnSayTextReady(const QString &text);
+
 private:
     /**
      * @brief 根据图片尺寸更新命中区域
@@ -105,10 +117,11 @@ private:
     void CenterOnScreen();
 
 private:
-    PetController *m_controller; ///< 宠物控制器
-    QLabel *m_imageLabel;        ///< 帧显示标签
-    QLabel *m_bubbleLabel;       ///< 气泡标签
-    QSize m_currentImageSize;    ///< 当前图片尺寸
+    PetController *m_controller;          ///< 宠物控制器
+    QLabel *m_imageLabel;                 ///< 帧显示标签
+    QLabel *m_bubbleLabel;                ///< 气泡标签
+    ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
+    QSize m_currentImageSize;             ///< 当前图片尺寸
 };
 
 } // namespace vpet
