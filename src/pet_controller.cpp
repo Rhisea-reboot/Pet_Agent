@@ -3,11 +3,13 @@
 #include "vpet/tts_client.h"
 #include "vpet/tts_audio_player.h"
 
+#include <QCoreApplication>
 #include <QCursor>
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
 #include <QRandomGenerator>
 #include <QScreen>
-#include <QDir>
 
 namespace vpet
 {
@@ -61,8 +63,27 @@ bool PetController::Initialize()
     // 初始化 TTS 客户端
     m_ttsClient = new TtsClient(this);
 
-    const QString ttsConfigPath = QStringLiteral("tts_config.json");
-    m_ttsClient->LoadConfig(ttsConfigPath);
+    // 优先查找可执行文件同目录下的配置文件，其次查找工作目录
+    const QString exeDirPath = QCoreApplication::applicationDirPath()
+                               + QStringLiteral("/tts_config.json");
+
+    const QString workDirPath = QStringLiteral("tts_config.json");
+
+    QString ttsConfigPath = QString();
+
+    if (QFile::exists(exeDirPath))
+    {
+        ttsConfigPath = exeDirPath;
+    }
+    else if (QFile::exists(workDirPath))
+    {
+        ttsConfigPath = workDirPath;
+    }
+
+    if (!ttsConfigPath.isEmpty())
+    {
+        m_ttsClient->LoadConfig(ttsConfigPath);
+    }
 
     connect(m_ttsClient, &TtsClient::SynthesisFinished,
             this, &PetController::OnTtsSynthesisFinished);

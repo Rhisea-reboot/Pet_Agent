@@ -4,9 +4,10 @@ REM GPT-SoVITS TTS Server Launcher
 REM 在启动桌宠前运行此脚本以启动 TTS 服务
 REM ============================================
 
-cd /d E:\GPT-SoVITS-v2pro-20250604-nvidia50
+cd /d "%~dp0GPT-SoVITS"
 
 echo Starting GPT-SoVITS API server...
+echo Working directory: %cd%
 echo Server will listen on http://127.0.0.1:9880
 echo.
 

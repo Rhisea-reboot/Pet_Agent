@@ -11,3 +11,6 @@ build/
 cmake-build-*/
 Debug/
 Release/
+
+# GPT-SoVITS (15GB, contains model weights + runtime, not for git)
+GPT-SoVITS/
