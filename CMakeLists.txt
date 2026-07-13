@@ -10,7 +10,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC OFF)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Multimedia)
 
 set(VPET_SOURCES
     src/main.cpp
@@ -24,6 +24,10 @@ set(VPET_SOURCES
     src/pet_controller.cpp
     src/bubble_message.cpp
     src/hit_region.cpp
+    src/say_dialog.cpp
+    src/tts_client.cpp
+    src/tts_audio_player.cpp
+    src/chat_bubble_window.cpp
 )
 
 set(VPET_HEADERS
@@ -36,6 +40,10 @@ set(VPET_HEADERS
     include/vpet/pet_controller.h
     include/vpet/bubble_message.h
     include/vpet/hit_region.h
+    include/vpet/say_dialog.h
+    include/vpet/tts_client.h
+    include/vpet/tts_audio_player.h
+    include/vpet/chat_bubble_window.h
     src/main_window.h
 )
 
@@ -51,6 +59,8 @@ target_link_libraries(${PROJECT_NAME}
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets
+        Qt6::Network
+        Qt6::Multimedia
 )
 
 if(WIN32)
