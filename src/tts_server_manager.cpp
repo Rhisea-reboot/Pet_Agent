@@ -1,6 +1,7 @@
 #include "vpet/tts_server_manager.h"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -41,30 +42,42 @@ TtsServerManager::~TtsServerManager()
 
 bool TtsServerManager::Start(const QString &configPath)
 {
+    qDebug() << "[TTS] TtsServerManager::Start";
+
     if (m_serverProcess != nullptr)
     {
+        qDebug() << "[TTS]   already started";
         return false;
     }
 
     emit StatusChanged(QStringLiteral("正在查找配置文件..."));
 
     const QString resolvedPath = FindConfigFile(configPath);
+    qDebug() << "[TTS]   FindConfigFile result:" << resolvedPath;
 
     if (resolvedPath.isEmpty())
     {
+        qDebug() << "[TTS]   FAILED - config file not found";
         emit ServerStartFailed(QStringLiteral("未找到 tts_config.json 配置文件"));
         return false;
     }
 
     if (!LoadServerConfig(resolvedPath))
     {
+        qDebug() << "[TTS]   FAILED - LoadServerConfig failed";
         emit ServerStartFailed(QStringLiteral("TTS 配置文件解析失败"));
         return false;
     }
 
+    qDebug() << "[TTS]   pythonExePath:" << m_pythonExePath;
+    qDebug() << "[TTS]   apiScriptPath:" << m_apiScriptPath;
+    qDebug() << "[TTS]   workingDir:" << m_workingDirectory;
+    qDebug() << "[TTS]   apiArgs:" << m_apiArgs;
+
     // 检查 Python 解释器是否存在
     if (!QFileInfo::exists(m_pythonExePath))
     {
+        qDebug() << "[TTS]   FAILED - python.exe not found at:" << m_pythonExePath;
         emit ServerStartFailed(
             QStringLiteral("未找到 Python 解释器: %1").arg(m_pythonExePath));
         return false;
@@ -73,6 +86,7 @@ bool TtsServerManager::Start(const QString &configPath)
     // 检查 API 脚本是否存在
     if (!QFileInfo::exists(m_apiScriptPath))
     {
+        qDebug() << "[TTS]   FAILED - api_v2.py not found at:" << m_apiScriptPath;
         emit ServerStartFailed(
             QStringLiteral("未找到 API 脚本: %1").arg(m_apiScriptPath));
         return false;
@@ -95,13 +109,17 @@ bool TtsServerManager::Start(const QString &configPath)
     const QStringList arguments = m_apiArgs.split(QLatin1Char(' '),
                                                    Qt::SkipEmptyParts);
 
+    qDebug() << "[TTS]   starting process:" << m_pythonExePath << arguments;
     m_serverProcess->start(m_pythonExePath, arguments);
 
     if (!m_serverProcess->waitForStarted(5000))
     {
+        qDebug() << "[TTS]   FAILED - process failed to start";
         emit ServerStartFailed(QStringLiteral("TTS 服务进程启动失败"));
         return false;
     }
+
+    qDebug() << "[TTS]   process started, PID:" << m_serverProcess->processId();
 
     emit StatusChanged(QStringLiteral("TTS 服务正在加载模型，请稍候..."));
 
@@ -123,6 +141,7 @@ bool TtsServerManager::Start(const QString &configPath)
         }
     });
 
+    qDebug() << "[TTS]   health check timer started, interval:" << HEALTH_CHECK_INTERVAL_MS << "ms";
     return true;
 }
 
@@ -186,6 +205,7 @@ void TtsServerManager::OnHealthCheckTimer()
     // 超时检查
     if (m_healthCheckCount >= HEALTH_CHECK_TIMEOUT_COUNT)
     {
+        qDebug() << "[TTS]   health check TIMEOUT after" << m_healthCheckCount << "attempts";
         m_healthCheckTimer->stop();
         emit ServerStartFailed(
             QStringLiteral("TTS 服务启动超时（约 %1 秒），请检查服务是否正常")
@@ -198,7 +218,7 @@ void TtsServerManager::OnHealthCheckTimer()
 
 void TtsServerManager::OnProcessError(QProcess::ProcessError error)
 {
-    (void)error;
+    qDebug() << "[TTS] OnProcessError:" << error;
 
     if (m_healthCheckTimer != nullptr)
     {
@@ -206,6 +226,7 @@ void TtsServerManager::OnProcessError(QProcess::ProcessError error)
     }
 
     const QString errorMsg = m_serverProcess->errorString();
+    qDebug() << "[TTS]   process error string:" << errorMsg;
     emit ServerStartFailed(
         QStringLiteral("TTS 服务进程错误: %1").arg(errorMsg));
 }
@@ -213,7 +234,7 @@ void TtsServerManager::OnProcessError(QProcess::ProcessError error)
 void TtsServerManager::OnProcessFinished(int exitCode,
                                           QProcess::ExitStatus exitStatus)
 {
-    (void)exitStatus;
+    qDebug() << "[TTS] OnProcessFinished, exitCode:" << exitCode << "exitStatus:" << exitStatus;
 
     // 仅在服务器尚未就绪时报告退出
     if (!m_isReady)
@@ -223,6 +244,9 @@ void TtsServerManager::OnProcessFinished(int exitCode,
             m_healthCheckTimer->stop();
         }
 
+        const QByteArray stderrOutput = m_serverProcess->readAllStandardError();
+        qDebug() << "[TTS]   stderr:" << QString::fromUtf8(stderrOutput);
+
         emit ServerStartFailed(
             QStringLiteral("TTS 服务进程意外退出，退出码: %1").arg(exitCode));
     }
@@ -230,10 +254,13 @@ void TtsServerManager::OnProcessFinished(int exitCode,
 
 bool TtsServerManager::LoadServerConfig(const QString &configPath)
 {
+    qDebug() << "[TTS] LoadServerConfig, path:" << configPath;
+
     QFile file(configPath);
 
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
+        qDebug() << "[TTS]   FAILED - cannot open file";
         return false;
     }
 
@@ -244,6 +271,7 @@ bool TtsServerManager::LoadServerConfig(const QString &configPath)
 
     if (!doc.isObject())
     {
+        qDebug() << "[TTS]   FAILED - not a JSON object";
         return false;
     }
 
@@ -256,6 +284,8 @@ bool TtsServerManager::LoadServerConfig(const QString &configPath)
     // Python 解释器与脚本路径 — 相对于 GPT-SoVITS 工作目录
     const QString gptSovitsDir = QFileInfo(configPath).absoluteDir()
                                  .absoluteFilePath(QStringLiteral("GPT-SoVITS"));
+
+    qDebug() << "[TTS]   gptSovitsDir:" << gptSovitsDir;
 
     m_workingDirectory = gptSovitsDir;
 
@@ -278,6 +308,11 @@ bool TtsServerManager::LoadServerConfig(const QString &configPath)
                     .arg(host)
                     .arg(port)
                     .arg(configArg);
+
+    qDebug() << "[TTS]   serverUrl:" << m_serverUrl;
+    qDebug() << "[TTS]   pythonExePath:" << m_pythonExePath;
+    qDebug() << "[TTS]   apiScriptPath:" << m_apiScriptPath;
+    qDebug() << "[TTS]   apiArgs:" << m_apiArgs;
 
     return true;
 }
@@ -333,8 +368,13 @@ void TtsServerManager::PerformHealthCheck()
         reply->deleteLater();
         networkManager->deleteLater();
 
+        const int statusCode = reply->attribute(
+                                   QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
         if (reply->error() == QNetworkReply::NoError)
         {
+            qDebug() << "[TTS]   health check PASSED, HTTP" << statusCode;
+
             if (m_healthCheckTimer != nullptr)
             {
                 m_healthCheckTimer->stop();
@@ -348,6 +388,8 @@ void TtsServerManager::PerformHealthCheck()
 
         // 部分情况下服务器已就绪但 /docs 不可用，尝试 /tts 端点
         // 只要不是 ConnectionRefusedError 就认为在启动中
+        qDebug() << "[TTS]   health check#" << m_healthCheckCount
+                 << "failed:" << reply->errorString();
     });
 }
 
