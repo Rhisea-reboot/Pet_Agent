@@ -11,6 +11,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcessEnvironment>
+#include <QThread>
 
 namespace vpet
 {
@@ -95,20 +96,35 @@ bool TtsServerManager::Start(const QString &configPath)
 
     emit StatusChanged(QStringLiteral("正在清理旧 TTS 进程..."));
 
-    // 精准杀掉占用 9880 端口的残留进程（避免误杀其他 python 进程）
+    // 精准杀掉占用 9880 端口的残留进程
+    // 使用 PowerShell 避免 cmd findstr 转义问题
     {
-        QProcess netstatProcess;
-        netstatProcess.start(QStringLiteral("cmd.exe"),
-                             QStringList() << QStringLiteral("/c")
-                             << QStringLiteral("for /f \"tokens=5\" %a in "
-                                "('netstat -ano ^| findstr :9880 ^| findstr LISTENING') "
-                                "do taskkill /F /PID %a"));
+        QProcess cleanupProcess;
 
-        netstatProcess.waitForFinished(5000);
+        const QString psCommand = QStringLiteral(
+            "Get-NetTCPConnection -LocalPort %1 -ErrorAction SilentlyContinue | "
+            "Select-Object -ExpandProperty OwningProcess | "
+            "ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }")
+            .arg(9880);
+
+        cleanupProcess.start(QStringLiteral("powershell.exe"),
+                             QStringList() << QStringLiteral("-NoProfile")
+                             << QStringLiteral("-Command") << psCommand);
+
+        cleanupProcess.waitForFinished(8000);
 
         qDebug() << "[TTS]   port 9880 cleanup done, exitCode:"
-                 << netstatProcess.exitCode();
+                 << cleanupProcess.exitCode();
+
+        if (cleanupProcess.exitCode() != 0)
+        {
+            qDebug() << "[TTS]   cleanup stderr:"
+                     << QString::fromUtf8(cleanupProcess.readAllStandardError());
+        }
     }
+
+    // 等待端口释放
+    QThread::msleep(500);
 
     emit StatusChanged(QStringLiteral("正在启动 TTS 服务..."));
 
