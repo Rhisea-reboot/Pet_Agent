@@ -93,6 +93,23 @@ bool TtsServerManager::Start(const QString &configPath)
         return false;
     }
 
+    emit StatusChanged(QStringLiteral("正在清理旧 TTS 进程..."));
+
+    // 精准杀掉占用 9880 端口的残留进程（避免误杀其他 python 进程）
+    {
+        QProcess netstatProcess;
+        netstatProcess.start(QStringLiteral("cmd.exe"),
+                             QStringList() << QStringLiteral("/c")
+                             << QStringLiteral("for /f \"tokens=5\" %a in "
+                                "('netstat -ano ^| findstr :9880 ^| findstr LISTENING') "
+                                "do taskkill /F /PID %a"));
+
+        netstatProcess.waitForFinished(5000);
+
+        qDebug() << "[TTS]   port 9880 cleanup done, exitCode:"
+                 << netstatProcess.exitCode();
+    }
+
     emit StatusChanged(QStringLiteral("正在启动 TTS 服务..."));
 
     // 启动 GPT-SoVITS 进程
@@ -105,6 +122,7 @@ bool TtsServerManager::Start(const QString &configPath)
                      QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                      this, &TtsServerManager::OnProcessFinished);
 
+    m_serverProcess->setProcessChannelMode(QProcess::ForwardedErrorChannel);
     m_serverProcess->setWorkingDirectory(m_workingDirectory);
 
     // 设置 PYTHONPATH 确保优先使用本地 tools/ 和 GPT_SoVITS/
