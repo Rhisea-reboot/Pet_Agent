@@ -27,7 +27,9 @@ set(VPET_SOURCES
     src/say_dialog.cpp
     src/tts_client.cpp
     src/tts_audio_player.cpp
+    src/tts_server_manager.cpp
     src/chat_bubble_window.cpp
+    src/splash_window.cpp
 )
 
 set(VPET_HEADERS
@@ -43,7 +45,9 @@ set(VPET_HEADERS
     include/vpet/say_dialog.h
     include/vpet/tts_client.h
     include/vpet/tts_audio_player.h
+    include/vpet/tts_server_manager.h
     include/vpet/chat_bubble_window.h
+    include/vpet/splash_window.h
     src/main_window.h
 )
 

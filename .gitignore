@@ -12,5 +12,27 @@ cmake-build-*/
 Debug/
 Release/
 
-# GPT-SoVITS (15GB, contains model weights + runtime, not for git)
-GPT-SoVITS/
+# GPT-SoVITS — 排除大型二进制文件，仅跟踪 Python 源码与配置
+GPT-SoVITS/runtime/
+GPT-SoVITS/GPT_weights/
+GPT-SoVITS/GPT_weights_v2/
+GPT-SoVITS/GPT_weights_v2Pro/
+GPT-SoVITS/GPT_weights_v2ProPlus/
+GPT-SoVITS/GPT_weights_v3/
+GPT-SoVITS/GPT_weights_v4/
+GPT-SoVITS/SoVITS_weights/
+GPT-SoVITS/SoVITS_weights_v2/
+GPT-SoVITS/SoVITS_weights_v2Pro/
+GPT-SoVITS/SoVITS_weights_v2ProPlus/
+GPT-SoVITS/SoVITS_weights_v3/
+GPT-SoVITS/SoVITS_weights_v4/
+GPT-SoVITS/GPT_SoVITS/pretrained_models/
+GPT-SoVITS/GPT_SoVITS/__pycache__/
+GPT-SoVITS/GPT_SoVITS/**/__pycache__/
+GPT-SoVITS/__pycache__/
+GPT-SoVITS/**/__pycache__/
+GPT-SoVITS/logs/
+GPT-SoVITS/output/
+GPT-SoVITS/TEMP/
+GPT-SoVITS/tools/
+GPT-SoVITS/*.cache
