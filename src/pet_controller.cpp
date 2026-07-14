@@ -49,6 +49,7 @@ PetController::PetController(const QString &animationBasePath, QObject *parent)
     , m_tempDir()
     , m_currentSayText()
     , m_sayTextShown(false)
+    , m_synthesisCounter(0)
 {
 }
 
@@ -316,8 +317,20 @@ void PetController::OnUpdate()
 
             if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured())
             {
-                const QString tempWavPath = m_tempDir.filePath(
-                    QStringLiteral("say_output.wav"));
+                // 停止当前正在播放的音频
+                if ((m_ttsAudioPlayer != nullptr) && m_ttsAudioPlayer->IsPlaying())
+                {
+                    qDebug() << "[TTS]   stopping current playback for new synthesis";
+                    m_ttsAudioPlayer->Stop();
+                }
+
+                // 使用唯一文件名防止并发请求覆盖
+                const QString uniqueName = QStringLiteral("say_%1.wav")
+                                           .arg(m_synthesisCounter);
+
+                const QString tempWavPath = m_tempDir.filePath(uniqueName);
+
+                m_synthesisCounter += 1;
 
                 qDebug() << "[TTS]   calling Synthesize, output:" << tempWavPath;
                 m_ttsClient->Synthesize(m_currentSayText, tempWavPath);

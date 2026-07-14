@@ -251,6 +251,7 @@ private:
     QTemporaryDir m_tempDir;                    ///< 临时目录，存放合成的音频文件
     QString m_currentSayText;                   ///< 当前 Say 台词文本
     bool m_sayTextShown;                        ///< 当前 Say 周期是否已显示气泡
+    int m_synthesisCounter;                     ///< TTS 合成序号，用于生成唯一文件名
 };
 
 } // namespace vpet

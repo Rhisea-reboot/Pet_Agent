@@ -87,7 +87,6 @@ private:
     QNetworkAccessManager *m_networkManager; ///< HTTP 网络管理器
     _tagTtsConfig m_config;                  ///< TTS 配置信息
     bool m_isConfigured;                     ///< 是否已加载配置
-    QString m_pendingOutputPath;             ///< 当前请求的输出路径
 };
 
 } // namespace vpet

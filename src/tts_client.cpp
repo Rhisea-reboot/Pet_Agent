@@ -25,7 +25,6 @@ TtsClient::TtsClient(QObject *parent)
     , m_networkManager(nullptr)
     , m_config()
     , m_isConfigured(false)
-    , m_pendingOutputPath()
 {
     m_networkManager = new QNetworkAccessManager(this);
 
@@ -135,8 +134,6 @@ void TtsClient::Synthesize(const QString &text, const QString &outputPath)
         dir.mkpath(QStringLiteral("."));
     }
 
-    m_pendingOutputPath = outputPath;
-
     // 构建请求 JSON
     QJsonObject body;
     body[QStringLiteral("text")] = text;
@@ -156,7 +153,11 @@ void TtsClient::Synthesize(const QString &text, const QString &outputPath)
                       QStringLiteral("application/json"));
     request.setTransferTimeout(HTTP_REQUEST_TIMEOUT_MS);
 
-    m_networkManager->post(request, bodyData);
+    QNetworkReply *reply = m_networkManager->post(request, bodyData);
+
+    // 将输出路径绑定到此次请求的 reply 上，防止并发请求时路径错乱
+    reply->setProperty("outputPath", outputPath);
+
     qDebug() << "[TTS]   request sent, waiting for reply...";
 }
 
@@ -172,8 +173,18 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
         return;
     }
 
+    // 从 reply 属性中获取本次请求的输出路径
+    const QString outputPath = reply->property("outputPath").toString();
+
     // 确保 reply 资源在函数结束时释放
     reply->deleteLater();
+
+    if (outputPath.isEmpty())
+    {
+        qDebug() << "[TTS]   FAILED - no outputPath property on reply";
+        emit SynthesisFinished(QString());
+        return;
+    }
 
     const int statusCode = reply->attribute(
                                QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -183,7 +194,6 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     if (reply->error() != QNetworkReply::NoError)
     {
         qDebug() << "[TTS]   FAILED - network error:" << reply->errorString();
-        emit SynthesisFinished(QString());
         return;
     }
 
@@ -191,7 +201,6 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     {
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - HTTP" << statusCode << "error body:" << QString::fromUtf8(errorBody);
-        emit SynthesisFinished(QString());
         return;
     }
 
@@ -202,30 +211,26 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     if (audioData.isEmpty())
     {
         qDebug() << "[TTS]   FAILED - empty audio data";
-        emit SynthesisFinished(QString());
         return;
     }
 
     // 写入音频文件
-    QFile outputFile(m_pendingOutputPath);
+    QFile outputFile(outputPath);
 
     if (!outputFile.open(QIODevice::WriteOnly))
     {
-        qDebug() << "[TTS]   FAILED - cannot write to:" << m_pendingOutputPath;
-        emit SynthesisFinished(QString());
+        qDebug() << "[TTS]   FAILED - cannot write to:" << outputPath;
+        emit SynthesisFinished(outputPath);
         return;
     }
 
     const qint64 bytesWritten = outputFile.write(audioData);
     outputFile.close();
 
-    qDebug() << "[TTS]   wrote" << bytesWritten << "bytes to" << m_pendingOutputPath;
+    qDebug() << "[TTS]   wrote" << bytesWritten << "bytes to" << outputPath;
+    qDebug() << "[TTS]   synthesis SUCCESS, file:" << outputPath;
 
-    const QString resultPath = m_pendingOutputPath;
-    m_pendingOutputPath.clear();
-
-    emit SynthesisFinished(resultPath);
-    qDebug() << "[TTS]   synthesis SUCCESS, file:" << resultPath;
+    emit SynthesisFinished(outputPath);
 }
 
 } // namespace vpet
