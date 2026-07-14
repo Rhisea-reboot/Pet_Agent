@@ -10,6 +10,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QProcessEnvironment>
 
 namespace vpet
 {
@@ -105,6 +106,28 @@ bool TtsServerManager::Start(const QString &configPath)
                      this, &TtsServerManager::OnProcessFinished);
 
     m_serverProcess->setWorkingDirectory(m_workingDirectory);
+
+    // 设置 PYTHONPATH 确保优先使用本地 tools/ 和 GPT_SoVITS/
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString pythonPath = m_workingDirectory
+                               + QStringLiteral(";")
+                               + m_workingDirectory
+                               + QStringLiteral("/GPT_SoVITS");
+
+    // 将本地路径插入到 PYTHONPATH 最前面
+    const QString existingPythonPath = env.value(QStringLiteral("PYTHONPATH"));
+
+    if (!existingPythonPath.isEmpty())
+    {
+        env.insert(QStringLiteral("PYTHONPATH"),
+                   pythonPath + QStringLiteral(";") + existingPythonPath);
+    }
+    else
+    {
+        env.insert(QStringLiteral("PYTHONPATH"), pythonPath);
+    }
+
+    m_serverProcess->setProcessEnvironment(env);
 
     const QStringList arguments = m_apiArgs.split(QLatin1Char(' '),
                                                    Qt::SkipEmptyParts);
