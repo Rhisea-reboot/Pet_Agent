@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QCursor>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -66,6 +67,8 @@ bool PetController::Initialize()
 
     // 多级路径查找配置文件（与 TtsServerManager::FindConfigFile 逻辑一致）
     const QString exeDir = QCoreApplication::applicationDirPath();
+    qDebug() << "[TTS] PetController init - exeDir:" << exeDir;
+    qDebug() << "[TTS] PetController init - cwd:" << QDir::currentPath();
 
     const QStringList candidatePaths =
     {
@@ -79,9 +82,13 @@ bool PetController::Initialize()
 
     for (const QString &candidate : candidatePaths)
     {
-        if (QFile::exists(candidate))
+        const bool exists = QFile::exists(candidate);
+        qDebug() << "[TTS]   checking:" << candidate << "->" << (exists ? "FOUND" : "not found");
+
+        if (exists)
         {
             ttsConfigPath = QFileInfo(candidate).absoluteFilePath();
+            qDebug() << "[TTS]   resolved:" << ttsConfigPath;
             break;
         }
     }
@@ -89,6 +96,10 @@ bool PetController::Initialize()
     if (!ttsConfigPath.isEmpty())
     {
         m_ttsClient->LoadConfig(ttsConfigPath);
+    }
+    else
+    {
+        qDebug() << "[TTS]   WARNING: tts_config.json not found in any search path!";
     }
 
     connect(m_ttsClient, &TtsClient::SynthesisFinished,
@@ -278,25 +289,42 @@ void PetController::OnUpdate()
         if (currentState == PET_STATE::SAYING)
         {
             const QString clipName = m_stateMachine.GetCurrentClipName();
+            qDebug() << "[TTS] === Entering SAYING state ===";
+            qDebug() << "[TTS]   clipName:" << clipName;
             emit SayStarted(clipName);
 
             // 选中台词文本并立即显示气泡
             m_currentSayText = SayDialog::GetRandomText(clipName);
             m_sayTextShown = false;
 
+            qDebug() << "[TTS]   selected text:" << m_currentSayText;
+
             if (!m_currentSayText.isEmpty())
             {
                 m_sayTextShown = true;
                 emit SayTextReady(m_currentSayText);
+                qDebug() << "[TTS]   bubble shown";
+            }
+            else
+            {
+                qDebug() << "[TTS]   WARNING: no text found for group:" << clipName;
             }
 
             // 触发 TTS 合成
+            qDebug() << "[TTS]   m_ttsClient ptr:" << (m_ttsClient != nullptr);
+            qDebug() << "[TTS]   m_ttsClient->IsConfigured():" << ((m_ttsClient != nullptr) ? m_ttsClient->IsConfigured() : false);
+
             if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured())
             {
                 const QString tempWavPath = m_tempDir.filePath(
                     QStringLiteral("say_output.wav"));
 
+                qDebug() << "[TTS]   calling Synthesize, output:" << tempWavPath;
                 m_ttsClient->Synthesize(m_currentSayText, tempWavPath);
+            }
+            else
+            {
+                qDebug() << "[TTS]   SKIPPED synthesis - client null or not configured";
             }
         }
         else
@@ -440,36 +468,45 @@ void PetController::ClampPositionToScreen(QPoint &position) const
 
 void PetController::OnTtsSynthesisFinished(const QString &filePath)
 {
+    qDebug() << "[TTS] OnTtsSynthesisFinished, filePath:" << filePath;
+
     // 检查参数有效性
     if (filePath.isEmpty())
     {
+        qDebug() << "[TTS]   FAILED - empty filePath (synthesis error or server error)";
         return;
     }
 
     if (m_ttsAudioPlayer == nullptr)
     {
+        qDebug() << "[TTS]   FAILED - audio player is null";
         return;
     }
 
     // 仅当宠物仍在 SAYING 状态时播放音频
-    if (m_stateMachine.GetCurrentState() != PET_STATE::SAYING)
+    const PET_STATE currentState = m_stateMachine.GetCurrentState();
+
+    if (currentState != PET_STATE::SAYING)
     {
+        qDebug() << "[TTS]   SKIPPED playback - pet no longer SAYING, current state:" << static_cast<int>(currentState);
         return;
     }
 
+    qDebug() << "[TTS]   playing audio file...";
     m_ttsAudioPlayer->Play(filePath);
 
     // 如果此前因 TTS 延迟未显示气泡，补充显示
     if (!m_sayTextShown && !m_currentSayText.isEmpty())
     {
         m_sayTextShown = true;
+        qDebug() << "[TTS]   late bubble show:" << m_currentSayText;
         emit SayTextReady(m_currentSayText);
     }
 }
 
 void PetController::OnAudioPlaybackFinished()
 {
-    // 播放完成后可在此处扩展后续逻辑
+    qDebug() << "[TTS] OnAudioPlaybackFinished - audio playback done";
 }
 
 } // namespace vpet
