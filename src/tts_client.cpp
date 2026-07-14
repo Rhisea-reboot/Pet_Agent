@@ -193,7 +193,9 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
 
     if (reply->error() != QNetworkReply::NoError)
     {
+        const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - network error:" << reply->errorString();
+        qDebug() << "[TTS]   server response body:" << QString::fromUtf8(errorBody);
         return;
     }
 
