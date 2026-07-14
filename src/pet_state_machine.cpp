@@ -23,6 +23,7 @@ PetStateMachine::PetStateMachine(const AnimationResourceManager &resourceManager
     , m_frameIndex(0)
     , m_elapsedMs(0)
     , m_shouldExitLoop(false)
+    , m_sayPending(false)
 {
 }
 
@@ -50,16 +51,19 @@ bool PetStateMachine::IdleTrigger()
 
     const int value = QRandomGenerator::global()->bounded(RANDOM_MAX_PERCENT);
 
+    // Say 动作由外部 PetController 通过 SelectRandomSayAction / EnterSayState 控制，
+    // 确保 TTS 音频先合成完毕再播放动画
     if (value < SAY_PROBABILITY_PERCENT)
     {
-        const QList<QString> sayActions = m_resourceManager.GetSayActionNames();
+        m_sayPending = true;
+        return true;
+    }
 
-        if (!sayActions.isEmpty())
-        {
-            const int index = QRandomGenerator::global()->bounded(sayActions.size());
-            EnterState(PET_STATE::SAYING, sayActions[index]);
-            return true;
-        }
+    // SAYING 状态下不允许 IdleTrigger 切换到 WALKING/IDLE，
+    // 只有音频播放完毕或高优先级事件（拖拽/触摸）才能打断
+    if (m_currentState == PET_STATE::SAYING)
+    {
+        return false;
     }
 
     if (value < (SAY_PROBABILITY_PERCENT + WALK_PROBABILITY_PERCENT))
@@ -77,6 +81,40 @@ bool PetStateMachine::IdleTrigger()
     }
 
     return true;
+}
+
+QString PetStateMachine::SelectRandomSayAction() const
+{
+    const QList<QString> sayActions = m_resourceManager.GetSayActionNames();
+
+    if (sayActions.isEmpty())
+    {
+        return QString();
+    }
+
+    const int index = QRandomGenerator::global()->bounded(sayActions.size());
+    return sayActions[index];
+}
+
+bool PetStateMachine::EnterSayState(const QString &actionName)
+{
+    // 检查参数有效性
+    if (actionName.isEmpty())
+    {
+        return false;
+    }
+
+    // 仅在待机组状态下可进入 SAYING
+    const bool isInIdleGroup = (m_currentState == PET_STATE::IDLE)
+                               || (m_currentState == PET_STATE::WALKING)
+                               || (m_currentState == PET_STATE::SAYING);
+
+    if (!isInIdleGroup)
+    {
+        return false;
+    }
+
+    return EnterState(PET_STATE::SAYING, actionName);
 }
 
 bool PetStateMachine::ClickHead()
@@ -231,6 +269,7 @@ bool PetStateMachine::EnterState(PET_STATE newState, const QString &actionName)
     m_currentState = newState;
     m_currentClip = newClip;
     m_shouldExitLoop = false;
+    m_sayPending = false;
     m_frameIndex = 0;
     m_elapsedMs = 0;
 
@@ -257,12 +296,11 @@ bool PetStateMachine::EnterState(PET_STATE newState, const QString &actionName)
     }
 
     const bool isPlayOnceState = (newState == PET_STATE::TOUCH_HEAD)
-                                 || (newState == PET_STATE::TOUCH_BODY)
-                                 || (newState == PET_STATE::SAYING);
+                                 || (newState == PET_STATE::TOUCH_BODY);
 
     if (isPlayOnceState && m_currentClip.HasSegment(ANIMATION_TYPE::C_END))
     {
-        // 点击类交互与说话只播放一次完整 A->B->C 序列，B 段不循环
+        // 点击类交互只播放一次完整 A->B->C 序列，B 段不循环
         m_shouldExitLoop = true;
     }
 
@@ -316,6 +354,13 @@ void PetStateMachine::ReturnToIdle()
 bool PetStateMachine::CanPreempt(PET_STATE newState) const
 {
     return GetPetStatePriority(newState) > GetPetStatePriority(m_currentState);
+}
+
+bool PetStateMachine::ConsumeSayPending()
+{
+    const bool wasPending = m_sayPending;
+    m_sayPending = false;
+    return wasPending;
 }
 
 } // namespace vpet
