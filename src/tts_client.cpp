@@ -74,6 +74,28 @@ bool TtsClient::LoadConfig(const QString &configPath)
 
     m_config.refAudioPath = obj.value(QStringLiteral("ref_audio_path")).toString();
 
+    // 将相对路径转换为绝对路径（相对于 GPT-SoVITS 工作目录）
+    if (!m_config.refAudioPath.isEmpty())
+    {
+        const QDir configDir = QFileInfo(configPath).absoluteDir();
+        const QString gptSovitsDir = configDir.absoluteFilePath(
+                                         QStringLiteral("GPT-SoVITS"));
+
+        const QFileInfo absRefPath(QDir(gptSovitsDir),
+                                   m_config.refAudioPath);
+
+        if (absRefPath.exists())
+        {
+            m_config.refAudioPath = absRefPath.absoluteFilePath();
+        }
+        else
+        {
+            // 如果文件不存在，仍尝试使用绝对路径（服务器可能自行解析）
+            m_config.refAudioPath = QDir(gptSovitsDir)
+                                    .absoluteFilePath(m_config.refAudioPath);
+        }
+    }
+
     m_config.promptText = obj.value(QStringLiteral("prompt_text")).toString();
 
     m_config.promptLang = obj.value(QStringLiteral("prompt_lang")).toString(
