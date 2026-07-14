@@ -555,6 +555,13 @@ void PetController::OnAudioPlaybackFinished()
 {
     qDebug() << "[TTS] OnAudioPlaybackFinished - audio playback done";
 
+    // 告诉状态机退出 SAYING 的 B 循环，进入 C→IDLE
+    if (m_stateMachine.GetCurrentState() == PET_STATE::SAYING)
+    {
+        qDebug() << "[TTS]   requesting exit from SAYING loop";
+        m_stateMachine.RequestExitLoop();
+    }
+
     // 播放完毕后删除音频文件以节约磁盘空间
     if (!m_pendingAudioPath.isEmpty())
     {
@@ -569,6 +576,9 @@ void PetController::OnAudioPlaybackFinished()
 
         m_pendingAudioPath.clear();
     }
+
+    // 清理 SAYING 相关状态
+    m_currentSayText.clear();
 }
 
 } // namespace vpet

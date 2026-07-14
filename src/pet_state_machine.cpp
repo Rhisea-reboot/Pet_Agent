@@ -59,6 +59,13 @@ bool PetStateMachine::IdleTrigger()
         return true;
     }
 
+    // SAYING 状态下不允许 IdleTrigger 切换到 WALKING/IDLE，
+    // 只有音频播放完毕或高优先级事件（拖拽/触摸）才能打断
+    if (m_currentState == PET_STATE::SAYING)
+    {
+        return false;
+    }
+
     if (value < (SAY_PROBABILITY_PERCENT + WALK_PROBABILITY_PERCENT))
     {
         const bool walkLeft = QRandomGenerator::global()->bounded(2) == 0;
@@ -289,12 +296,11 @@ bool PetStateMachine::EnterState(PET_STATE newState, const QString &actionName)
     }
 
     const bool isPlayOnceState = (newState == PET_STATE::TOUCH_HEAD)
-                                 || (newState == PET_STATE::TOUCH_BODY)
-                                 || (newState == PET_STATE::SAYING);
+                                 || (newState == PET_STATE::TOUCH_BODY);
 
     if (isPlayOnceState && m_currentClip.HasSegment(ANIMATION_TYPE::C_END))
     {
-        // 点击类交互与说话只播放一次完整 A->B->C 序列，B 段不循环
+        // 点击类交互只播放一次完整 A->B->C 序列，B 段不循环
         m_shouldExitLoop = true;
     }
 

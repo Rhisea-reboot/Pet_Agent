@@ -262,9 +262,8 @@ void MainWindow::OnSayTextReady(const QString &text)
         return;
     }
 
-    const int bubbleDurationMs = 3000;
-
-    m_chatBubbleWindow->Show(text, bubbleDurationMs);
+    // 气泡持续显示直到音频播放完毕离开 SAYING 状态，不设自动隐藏
+    m_chatBubbleWindow->Show(text, 0);
     m_chatBubbleWindow->FollowTarget(m_controller->GetPosition(), m_currentImageSize);
 }
 
