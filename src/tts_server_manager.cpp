@@ -284,36 +284,36 @@ bool TtsServerManager::LoadServerConfig(const QString &configPath)
 
 QString TtsServerManager::FindConfigFile(const QString &configPath) const
 {
-    // 用户传入路径
+    // 用户传入的路径（最高优先级）
     if (!configPath.isEmpty() && QFile::exists(configPath))
     {
-        return configPath;
+        return QFileInfo(configPath).absoluteFilePath();
     }
 
     const QString exeDir = QCoreApplication::applicationDirPath();
 
-    // exe 同目录
-    const QString exeDirPath = exeDir + QStringLiteral("/tts_config.json");
-
-    if (QFile::exists(exeDirPath))
+    // 构建候选路径列表
+    const QStringList candidatePaths =
     {
-        return exeDirPath;
-    }
+        // exe 同目录
+        exeDir + QStringLiteral("/tts_config.json"),
 
-    // 工作目录
-    const QString workDirPath = QStringLiteral("tts_config.json");
+        // 工作目录
+        QDir::currentPath() + QStringLiteral("/tts_config.json"),
 
-    if (QFile::exists(workDirPath))
+        // exe 上级目录（exe 在 build/ 下，配置在项目根目录）
+        exeDir + QStringLiteral("/../tts_config.json"),
+
+        // exe 上两级目录（Qt Creator Debug 模式 exe 在 build/Debug/ 下）
+        exeDir + QStringLiteral("/../../tts_config.json"),
+    };
+
+    for (const QString &candidate : candidatePaths)
     {
-        return QFileInfo(workDirPath).absoluteFilePath();
-    }
-
-    // exe 上级目录（开发时 exe 在 build/ 下，配置在项目根目录）
-    const QString parentDirPath = exeDir + QStringLiteral("/../tts_config.json");
-
-    if (QFile::exists(parentDirPath))
-    {
-        return QFileInfo(parentDirPath).absoluteFilePath();
+        if (QFile::exists(candidate))
+        {
+            return QFileInfo(candidate).absoluteFilePath();
+        }
     }
 
     return QString();

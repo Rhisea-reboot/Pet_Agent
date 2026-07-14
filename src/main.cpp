@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QMessageBox>
+#include <QTimer>
 
 /**
  * @brief 获取动画资源根目录
@@ -51,11 +52,25 @@ int main(int argc, char *argv[])
     splashWindow.show();
     application.processEvents();
 
-    // 创建 TTS 服务管理器并自动启动
+    // 创建 TTS 服务管理器
     vpet::TtsServerManager ttsServerManager;
 
-    // 启动成功/失败后的共享逻辑
     bool ttsServerReady = false;
+
+    // 先建立事件循环 — 必须在 Start() 之前连接所有信号
+    // 因为 Start() 失败时会同步发射 ServerStartFailed，
+    // 如果连接在 Start() 之后，信号将丢失导致事件循环永远等待
+    QEventLoop waitLoop;
+
+    QObject::connect(&ttsServerManager,
+                     &vpet::TtsServerManager::ServerReady,
+                     &waitLoop,
+                     &QEventLoop::quit);
+
+    QObject::connect(&ttsServerManager,
+                     &vpet::TtsServerManager::ServerStartFailed,
+                     &waitLoop,
+                     &QEventLoop::quit);
 
     QObject::connect(&ttsServerManager,
                      &vpet::TtsServerManager::StatusChanged,
@@ -70,24 +85,22 @@ int main(int argc, char *argv[])
         ttsServerReady = true;
     });
 
-    // 启动 TTS 服务（异步）
+    // 启动 TTS 服务（内部同步失败会立即发射 ServerStartFailed → waitLoop.quit）
+    // 启动成功则进入异步健康检查，就绪后发射 ServerReady → waitLoop.quit
+    // 超时（约 36 秒）后也会发射 ServerStartFailed → waitLoop.quit
+    // 安全网：如果因任何原因两个信号都没发射，60 秒后强制退出等待
+    QTimer safetyTimer;
+    safetyTimer.setSingleShot(true);
+
+    QObject::connect(&safetyTimer, &QTimer::timeout, &waitLoop, &QEventLoop::quit);
+
+    safetyTimer.start(60000);
+
     ttsServerManager.Start(QString());
 
-    // 等待 TTS 就绪或超时，同时保持 UI 响应
-    // TtsServerManager 内部有超时机制（约 36 秒），超时会发射 ServerStartFailed
-    QEventLoop waitLoop;
-
-    QObject::connect(&ttsServerManager,
-                     &vpet::TtsServerManager::ServerReady,
-                     &waitLoop,
-                     &QEventLoop::quit);
-
-    QObject::connect(&ttsServerManager,
-                     &vpet::TtsServerManager::ServerStartFailed,
-                     &waitLoop,
-                     &QEventLoop::quit);
-
     waitLoop.exec();
+
+    safetyTimer.stop();
 
     // 隐藏启动画面
     splashWindow.hide();
