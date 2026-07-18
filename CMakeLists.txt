@@ -34,6 +34,7 @@ set(VPET_SOURCES
     src/sensor/screenshot_sensor.cpp
     src/llm/llm_client.cpp
     src/llm/vision_llm_client.cpp
+    src/agent/agent_dag_graph.cpp
 )
 
 set(VPET_HEADERS
@@ -56,6 +57,7 @@ set(VPET_HEADERS
     include/vpet/sensor/screenshot_sensor.h
     include/vpet/llm/llm_client.h
     include/vpet/llm/vision_llm_client.h
+    include/vpet/agent/agent_dag_graph.h
     src/main_window.h
 )
 

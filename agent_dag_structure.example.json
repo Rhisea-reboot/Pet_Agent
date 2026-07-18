@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    "parse_input",
+    "load_persona",
+    "retrieve_memory",
+    "analyze_emotion",
+    "load_user_profile",
+    "image_recognition",
+    "assemble_prompt",
+    "call_llm",
+    "format_output"
+  ],
+  "edges": [
+    { "from": "parse_input", "to": "load_persona" },
+    { "from": "parse_input", "to": "retrieve_memory" },
+    { "from": "parse_input", "to": "analyze_emotion" },
+    { "from": "parse_input", "to": "load_user_profile" },
+    { "from": "parse_input", "to": "image_recognition" },
+    { "from": "load_persona", "to": "assemble_prompt" },
+    { "from": "retrieve_memory", "to": "assemble_prompt" },
+    { "from": "analyze_emotion", "to": "assemble_prompt" },
+    { "from": "load_user_profile", "to": "assemble_prompt" },
+    { "from": "image_recognition", "to": "assemble_prompt" },
+    { "from": "assemble_prompt", "to": "call_llm" },
+    { "from": "call_llm", "to": "format_output" }
+  ]
+}
