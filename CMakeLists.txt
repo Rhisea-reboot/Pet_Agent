@@ -33,6 +33,7 @@ set(VPET_SOURCES
     src/perception/vision_encoder.cpp
     src/sensor/screenshot_sensor.cpp
     src/llm/llm_client.cpp
+    src/llm/vision_llm_client.cpp
 )
 
 set(VPET_HEADERS
@@ -54,6 +55,7 @@ set(VPET_HEADERS
     include/vpet/perception/vision_encoder.h
     include/vpet/sensor/screenshot_sensor.h
     include/vpet/llm/llm_client.h
+    include/vpet/llm/vision_llm_client.h
     src/main_window.h
 )
 
