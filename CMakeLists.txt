@@ -30,6 +30,8 @@ set(VPET_SOURCES
     src/tts_server_manager.cpp
     src/chat_bubble_window.cpp
     src/splash_window.cpp
+    src/perception/vision_encoder.cpp
+    src/sensor/screenshot_sensor.cpp
 )
 
 set(VPET_HEADERS
@@ -48,6 +50,8 @@ set(VPET_HEADERS
     include/vpet/tts_server_manager.h
     include/vpet/chat_bubble_window.h
     include/vpet/splash_window.h
+    include/vpet/perception/vision_encoder.h
+    include/vpet/sensor/screenshot_sensor.h
     src/main_window.h
 )
 

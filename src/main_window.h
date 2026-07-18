@@ -3,6 +3,7 @@
 
 #include "vpet/pet_controller.h"
 
+#include <QByteArray>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QWidget>
@@ -11,6 +12,7 @@ namespace vpet
 {
 
 class ChatBubbleWindow;
+class ScreenshotSensor;
 
 /**
  * @brief 桌宠主窗口
@@ -40,6 +42,14 @@ public:
      * @return 初始化成功返回 true
      */
     bool Initialize(const QString &animationBasePath);
+
+signals:
+    /**
+     * @brief 视觉截图数据就绪信号
+     * @param[in] base64Data Base64 图像数据
+     * @param[in] modality 模态名称
+     */
+    void PerceptionReceived(const QByteArray &base64Data, const QString &modality);
 
 protected:
     /**
@@ -104,6 +114,22 @@ private slots:
      */
     void OnSayTextReady(const QString &text);
 
+    /**
+     * @brief 截图完成槽
+     * @param[in] base64Data Base64 图像数据
+     * @param[in] frameCount 截图序号
+     * @param[in] frameSize 截图尺寸
+     */
+    void OnScreenshotCaptured(const QByteArray &base64Data,
+                              int frameCount,
+                              const QSize &frameSize);
+
+    /**
+     * @brief 截图错误槽
+     * @param[in] message 错误描述
+     */
+    void OnScreenshotError(const QString &message);
+
 private:
     /**
      * @brief 根据图片尺寸更新命中区域
@@ -121,6 +147,7 @@ private:
     QLabel *m_imageLabel;                 ///< 帧显示标签
     QLabel *m_bubbleLabel;                ///< 气泡标签
     ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
+    ScreenshotSensor *m_screenshotSensor; ///< 自动截图传感器
     QSize m_currentImageSize;             ///< 当前图片尺寸
 };
 

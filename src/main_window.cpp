@@ -1,7 +1,10 @@
 #include "main_window.h"
 #include "vpet/chat_bubble_window.h"
+#include "vpet/sensor/screenshot_sensor.h"
 
 #include <QApplication>
+#include <QByteArray>
+#include <QDebug>
 #include <QGuiApplication>
 #include <QScreen>
 
@@ -13,6 +16,7 @@ namespace
 
 constexpr int BUBBLE_OFFSET_Y = 10;     ///< 气泡与窗口顶部的偏移
 constexpr int TARGET_DISPLAY_WIDTH = 300; ///< 宠物显示宽度，按原图比例缩放
+constexpr int SCREENSHOT_INTERVAL_MS = 3000; ///< 自动截图间隔
 
 } // anonymous namespace
 
@@ -22,6 +26,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_imageLabel(nullptr)
     , m_bubbleLabel(nullptr)
     , m_chatBubbleWindow(nullptr)
+    , m_screenshotSensor(nullptr)
     , m_currentImageSize()
 {
     setWindowFlags(Qt::FramelessWindowHint
@@ -44,6 +49,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    delete m_screenshotSensor;
     delete m_controller;
 }
 
@@ -82,6 +88,24 @@ bool MainWindow::Initialize(const QString &animationBasePath)
     if (m_chatBubbleWindow != nullptr)
     {
         m_chatBubbleWindow->hide();
+    }
+
+    ScreenshotSensor::_tagConfig screenshotConfig;
+    screenshotConfig.intervalMs = SCREENSHOT_INTERVAL_MS;
+    screenshotConfig.captureAllScreens = false;
+    screenshotConfig.saveToDisk = false;
+    screenshotConfig.imageFormat = QStringLiteral("PNG");
+
+    m_screenshotSensor = new ScreenshotSensor(screenshotConfig, this);
+
+    connect(m_screenshotSensor, &ScreenshotSensor::FrameCaptured,
+            this, &MainWindow::OnScreenshotCaptured);
+    connect(m_screenshotSensor, &ScreenshotSensor::ErrorOccurred,
+            this, &MainWindow::OnScreenshotError);
+
+    if (!m_screenshotSensor->Start())
+    {
+        qWarning() << "[Vision] Screenshot sensor failed to start.";
     }
 
     CenterOnScreen();
@@ -265,6 +289,42 @@ void MainWindow::OnSayTextReady(const QString &text)
     // 气泡持续显示直到音频播放完毕离开 SAYING 状态，不设自动隐藏
     m_chatBubbleWindow->Show(text, 0);
     m_chatBubbleWindow->FollowTarget(m_controller->GetPosition(), m_currentImageSize);
+}
+
+void MainWindow::OnScreenshotCaptured(const QByteArray &base64Data,
+                                      int frameCount,
+                                      const QSize &frameSize)
+{
+    if (base64Data.isEmpty())
+    {
+        qWarning() << "[Vision] Empty screenshot payload ignored.";
+        return;
+    }
+
+    if (frameCount <= 0)
+    {
+        qWarning() << "[Vision] Invalid screenshot frame count:" << frameCount;
+        return;
+    }
+
+    if (!frameSize.isValid())
+    {
+        qWarning() << "[Vision] Invalid screenshot frame size:" << frameSize;
+        return;
+    }
+
+    emit PerceptionReceived(base64Data, QStringLiteral("vision/screenshot"));
+}
+
+void MainWindow::OnScreenshotError(const QString &message)
+{
+    if (message.isEmpty())
+    {
+        qWarning() << "[Vision] Screenshot sensor reported an empty error message.";
+        return;
+    }
+
+    qWarning() << "[Vision]" << message;
 }
 
 } // namespace vpet
