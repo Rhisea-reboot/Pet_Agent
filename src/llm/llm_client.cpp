@@ -77,12 +77,9 @@ bool LlmClient::LoadConfig(const QString &configPath)
 
     const QJsonObject object = document.object();
     _tagLlmConfig config;
-    config.baseUrl = object.value(QStringLiteral("base_url")).toString(
-                         QStringLiteral("https://api.openai.com/v1"));
-    config.apiKeyEnvName = object.value(QStringLiteral("api_key_env")).toString(
-                               QStringLiteral("OPENAI_API_KEY"));
-    config.model = object.value(QStringLiteral("model")).toString(
-                       QStringLiteral("gpt-4o-mini"));
+    config.baseUrl = object.value(QStringLiteral("base_url")).toString();
+    config.apiKey = object.value(QStringLiteral("api_key")).toString();
+    config.model = object.value(QStringLiteral("model")).toString();
     config.timeoutMs = object.value(QStringLiteral("timeout_ms")).toInt(DEFAULT_TIMEOUT_MS);
 
     return SetConfig(config);
@@ -127,15 +124,6 @@ int LlmClient::SendChat(const QVector<_tagLlmMessage> &messages,
         return -1;
     }
 
-    QString apiKey;
-    QString errorMessage;
-
-    if (!LoadApiKey(apiKey, errorMessage))
-    {
-        emit ChatFailed(-1, errorMessage, 0);
-        return -1;
-    }
-
     QJsonArray messageArray;
 
     for (const _tagLlmMessage &message : messages)
@@ -174,7 +162,7 @@ int LlmClient::SendChat(const QVector<_tagLlmMessage> &messages,
 
     QNetworkRequest request(requestUrl);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    request.setRawHeader("Authorization", QByteArray("Bearer ") + apiKey.toUtf8());
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + m_config.apiKey.toUtf8());
     request.setTransferTimeout(m_config.timeoutMs);
 
     const int requestId = m_nextRequestId;
@@ -280,7 +268,7 @@ bool LlmClient::NormalizeConfig(const _tagLlmConfig &config,
 {
     normalizedConfig = config;
     normalizedConfig.baseUrl = normalizedConfig.baseUrl.trimmed();
-    normalizedConfig.apiKeyEnvName = normalizedConfig.apiKeyEnvName.trimmed();
+    normalizedConfig.apiKey = normalizedConfig.apiKey.trimmed();
     normalizedConfig.model = normalizedConfig.model.trimmed();
 
     if (normalizedConfig.baseUrl.isEmpty())
@@ -302,9 +290,9 @@ bool LlmClient::NormalizeConfig(const _tagLlmConfig &config,
         return false;
     }
 
-    if (normalizedConfig.apiKeyEnvName.isEmpty())
+    if (normalizedConfig.apiKey.isEmpty())
     {
-        errorMessage = QStringLiteral("LLM API key environment variable name is empty.");
+        errorMessage = QStringLiteral("LLM API key is empty.");
         return false;
     }
 
@@ -396,34 +384,6 @@ bool LlmClient::ExtractAssistantContent(const QByteArray &responseData,
     if (content.isEmpty())
     {
         errorMessage = QStringLiteral("LLM response content is empty.");
-        return false;
-    }
-
-    return true;
-}
-
-bool LlmClient::LoadApiKey(QString &apiKey, QString &errorMessage) const
-{
-    if (m_config.apiKeyEnvName.trimmed().isEmpty())
-    {
-        errorMessage = QStringLiteral("LLM API key environment variable name is empty.");
-        return false;
-    }
-
-    const QByteArray envName = m_config.apiKeyEnvName.toUtf8();
-    const QByteArray envValue = qgetenv(envName.constData());
-
-    if (envValue.isEmpty())
-    {
-        errorMessage = QStringLiteral("LLM API key environment variable is not set.");
-        return false;
-    }
-
-    apiKey = QString::fromUtf8(envValue).trimmed();
-
-    if (apiKey.isEmpty())
-    {
-        errorMessage = QStringLiteral("LLM API key is empty.");
         return false;
     }
 

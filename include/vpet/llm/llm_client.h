@@ -36,9 +36,9 @@ struct _tagLlmMessage
  */
 struct _tagLlmConfig
 {
-    QString baseUrl;       ///< OpenAI 兼容 API 根地址
-    QString apiKeyEnvName; ///< API Key 所在环境变量名
-    QString model;         ///< 模型 ID
+    QString baseUrl; ///< OpenAI 兼容 API 根地址
+    QString apiKey;  ///< API Key
+    QString model;   ///< 模型 ID
     int timeoutMs = 30000; ///< HTTP 超时时间，单位毫秒
 };
 
@@ -187,15 +187,6 @@ private:
                                         QString &content,
                                         QString &errorMessage);
 
-    /**
-     * @brief 从环境变量读取 API Key
-     * @param[out] apiKey API Key
-     * @param[out] errorMessage 错误描述
-     * @return 读取成功返回 true
-     */
-    bool LoadApiKey(QString &apiKey, QString &errorMessage) const;
-
-private:
     QNetworkAccessManager *m_networkManager; ///< HTTP 网络管理器
     _tagLlmConfig m_config;                  ///< LLM 配置信息
     bool m_isConfigured;                     ///< 是否已配置
