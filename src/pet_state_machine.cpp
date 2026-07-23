@@ -41,8 +41,7 @@ void PetStateMachine::Initialize()
 bool PetStateMachine::IdleTrigger()
 {
     const bool isInIdleGroup = (m_currentState == PET_STATE::IDLE)
-                               || (m_currentState == PET_STATE::WALKING)
-                               || (m_currentState == PET_STATE::SAYING);
+                               || (m_currentState == PET_STATE::WALKING);
 
     if (!isInIdleGroup)
     {
@@ -57,13 +56,6 @@ bool PetStateMachine::IdleTrigger()
     {
         m_sayPending = true;
         return true;
-    }
-
-    // SAYING 状态下不允许 IdleTrigger 切换到 WALKING/IDLE，
-    // 只有音频播放完毕或高优先级事件（拖拽/触摸）才能打断
-    if (m_currentState == PET_STATE::SAYING)
-    {
-        return false;
     }
 
     if (value < (SAY_PROBABILITY_PERCENT + WALK_PROBABILITY_PERCENT))
@@ -104,10 +96,9 @@ bool PetStateMachine::EnterSayState(const QString &actionName)
         return false;
     }
 
-    // 仅在待机组状态下可进入 SAYING
+    // 仅在非 SAYING 的待机组状态下可进入 SAYING，避免 SAYING 重入后丢失启动事件。
     const bool isInIdleGroup = (m_currentState == PET_STATE::IDLE)
-                               || (m_currentState == PET_STATE::WALKING)
-                               || (m_currentState == PET_STATE::SAYING);
+                               || (m_currentState == PET_STATE::WALKING);
 
     if (!isInIdleGroup)
     {
@@ -171,7 +162,15 @@ bool PetStateMachine::DragEnd()
 
 bool PetStateMachine::RequestExitLoop()
 {
-    if (m_currentSegmentType != ANIMATION_TYPE::B_LOOP)
+    const bool canQueueExit = (m_currentSegmentType == ANIMATION_TYPE::A_START)
+                              || (m_currentSegmentType == ANIMATION_TYPE::B_LOOP);
+
+    if (!canQueueExit)
+    {
+        return false;
+    }
+
+    if (!m_currentClip.HasSegment(ANIMATION_TYPE::B_LOOP))
     {
         return false;
     }

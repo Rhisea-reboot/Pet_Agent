@@ -30,11 +30,17 @@ set(VPET_SOURCES
     src/tts_server_manager.cpp
     src/chat_bubble_window.cpp
     src/splash_window.cpp
+    src/perception/frame_buffer.cpp
+    src/perception/perception_pipeline.cpp
     src/perception/vision_encoder.cpp
     src/sensor/screenshot_sensor.cpp
+    src/speech/voice_input_manager.cpp
     src/llm/llm_client.cpp
     src/llm/vision_llm_client.cpp
+    src/agent/agent_context.cpp
     src/agent/agent_dag_graph.cpp
+    src/agent/emotion_rewrite_node.cpp
+    src/agent/agent_runtime.cpp
 )
 
 set(VPET_HEADERS
@@ -53,11 +59,18 @@ set(VPET_HEADERS
     include/vpet/tts_server_manager.h
     include/vpet/chat_bubble_window.h
     include/vpet/splash_window.h
+    include/vpet/perception/frame_buffer.h
+    include/vpet/perception/perception_pipeline.h
     include/vpet/perception/vision_encoder.h
     include/vpet/sensor/screenshot_sensor.h
+    include/vpet/speech/voice_input_manager.h
     include/vpet/llm/llm_client.h
     include/vpet/llm/vision_llm_client.h
+    include/vpet/agent/agent_context.h
+    include/vpet/agent/agent_context_keys.h
     include/vpet/agent/agent_dag_graph.h
+    include/vpet/agent/emotion_rewrite_node.h
+    include/vpet/agent/agent_runtime.h
     src/main_window.h
 )
 

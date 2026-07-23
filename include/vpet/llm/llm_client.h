@@ -97,6 +97,13 @@ public:
     bool IsConfigured() const;
 
     /**
+     * @brief 从指定文件加载系统提示词
+     * @param[in] contextPath 系统提示词文件路径
+     * @return 加载成功返回 true
+     */
+    bool LoadSystemPrompt(const QString &contextPath);
+
+    /**
      * @brief 发送多轮聊天消息
      * @param[in] messages 聊天消息列表，至少包含一条非空消息
      * @param[in] options 请求参数
@@ -187,8 +194,23 @@ private:
                                         QString &content,
                                         QString &errorMessage);
 
+    /**
+     * @brief 查找默认系统提示词文件
+     * @param[in] configPath LLM 配置文件路径
+     * @return 系统提示词文件路径；未找到返回空字符串
+     */
+    static QString FindSystemPromptPath(const QString &configPath);
+
+    /**
+     * @brief 判断消息列表是否已包含系统提示词
+     * @param[in] messages 聊天消息列表
+     * @return 已包含系统提示词返回 true
+     */
+    static bool HasSystemMessage(const QVector<_tagLlmMessage> &messages);
+
     QNetworkAccessManager *m_networkManager; ///< HTTP 网络管理器
     _tagLlmConfig m_config;                  ///< LLM 配置信息
+    QString m_systemPrompt;                  ///< 从 context.md 读取的系统提示词
     bool m_isConfigured;                     ///< 是否已配置
     int m_nextRequestId;                     ///< 下一个请求 ID
 };

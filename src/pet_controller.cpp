@@ -21,9 +21,44 @@ namespace
 
 constexpr int UPDATE_INTERVAL_MS = 16;                  ///< 主循环更新间隔，约 60 FPS
 constexpr int BUBBLE_DURATION_MS = 2000;                ///< 气泡默认显示时长
+constexpr int SAY_BUBBLE_DURATION_MS = 5000;            ///< Say 气泡显示时长
 constexpr int IDLE_TRIGGER_INTERVAL_MS = 3000;          ///< Idle 随机触发间隔
 constexpr int WALK_SPEED_PIXELS_PER_SECOND = 80;        ///< 默认步行速度
 constexpr int DRAG_MOVE_THRESHOLD_PIXELS = 5;           ///< 拖拽与点击的位移阈值
+constexpr int SAYING_TIMEOUT_MS = 20000;                ///< SAYING 状态最长持续时间
+constexpr int SAY_TRIGGER_COOLDOWN_MS = 8000;           ///< Say 连续触发冷却时间
+
+int GetSaySourcePriority(SaySource source)
+{
+    switch (source)
+    {
+    case SaySource::UserResponse:
+        return 3;
+
+    case SaySource::VisionProactive:
+        return 2;
+
+    case SaySource::IdleRandom:
+    default:
+        return 1;
+    }
+}
+
+QString SaySourceToString(SaySource source)
+{
+    switch (source)
+    {
+    case SaySource::UserResponse:
+        return QStringLiteral("user_response");
+
+    case SaySource::VisionProactive:
+        return QStringLiteral("vision_proactive");
+
+    case SaySource::IdleRandom:
+    default:
+        return QStringLiteral("idle_random");
+    }
+}
 
 } // anonymous namespace
 
@@ -46,10 +81,17 @@ PetController::PetController(const QString &animationBasePath, QObject *parent)
     , m_frameSize(100, 100)
     , m_ttsClient(nullptr)
     , m_ttsAudioPlayer(nullptr)
+    , m_sayingTimeoutTimer(nullptr)
     , m_tempDir()
     , m_currentSayText()
-    , m_sayTextShown(false)
+    , m_currentSaySource(SaySource::IdleRandom)
     , m_synthesisCounter(0)
+    , m_sayCooldownRemainingMs(0)
+    , m_pendingSaySource(SaySource::IdleRandom)
+    , m_discardPendingSynthesis(false)
+    , m_queuedSayText()
+    , m_queuedSayAction()
+    , m_queuedSaySource(SaySource::IdleRandom)
 {
 }
 
@@ -111,6 +153,13 @@ bool PetController::Initialize()
 
     connect(m_ttsAudioPlayer, &TtsAudioPlayer::PlaybackFinished,
             this, &PetController::OnAudioPlaybackFinished);
+
+    m_sayingTimeoutTimer = new QTimer(this);
+    m_sayingTimeoutTimer->setSingleShot(true);
+    m_sayingTimeoutTimer->setInterval(SAYING_TIMEOUT_MS);
+
+    connect(m_sayingTimeoutTimer, &QTimer::timeout,
+            this, &PetController::OnSayingTimeout);
 
     // 初始化更新定时器
     m_updateTimer = new QTimer(this);
@@ -257,17 +306,49 @@ QSize PetController::GetFrameSize() const
     return m_frameSize;
 }
 
+bool PetController::RequestSay(const QString &text, SaySource source)
+{
+    const QString normalizedText = text.trimmed();
+
+    if (normalizedText.isEmpty())
+    {
+        return false;
+    }
+
+    const PET_STATE currentState = m_stateMachine.GetCurrentState();
+    const bool canStartNow = ((currentState == PET_STATE::IDLE)
+                              || (currentState == PET_STATE::WALKING))
+                             && m_pendingSayAction.isEmpty()
+                             && !m_discardPendingSynthesis;
+
+    if (canStartNow)
+    {
+        return StartSayText(normalizedText, source, QString());
+    }
+
+    return QueueSayText(normalizedText, source);
+}
+
 void PetController::OnUpdate()
 {
     m_stateMachine.Update(UPDATE_INTERVAL_MS);
     m_bubbleMessage.Update(UPDATE_INTERVAL_MS);
 
+    if (m_sayCooldownRemainingMs > 0)
+    {
+        m_sayCooldownRemainingMs -= UPDATE_INTERVAL_MS;
+
+        if (m_sayCooldownRemainingMs < 0)
+        {
+            m_sayCooldownRemainingMs = 0;
+        }
+    }
+
     const PET_STATE currentState = m_stateMachine.GetCurrentState();
     const bool isInIdleGroup = (currentState == PET_STATE::IDLE)
-                               || (currentState == PET_STATE::WALKING)
-                               || (currentState == PET_STATE::SAYING);
+                               || (currentState == PET_STATE::WALKING);
 
-    if (isInIdleGroup)
+    if (isInIdleGroup && m_queuedSayText.isEmpty() && m_pendingSayAction.isEmpty())
     {
         const int value = QRandomGenerator::global()->bounded(IDLE_TRIGGER_INTERVAL_MS);
 
@@ -284,6 +365,7 @@ void PetController::OnUpdate()
 
     if (m_lastState != currentState)
     {
+        const PET_STATE previousState = m_lastState;
         m_lastState = currentState;
         emit StateChanged(currentState);
 
@@ -300,6 +382,8 @@ void PetController::OnUpdate()
             if (!m_currentSayText.isEmpty())
             {
                 qDebug() << "[TTS]   bubble shown:" << m_currentSayText;
+                m_bubbleMessage.Show(m_currentSayText, SAY_BUBBLE_DURATION_MS);
+                emit BubbleChanged(true, m_currentSayText);
                 emit SayTextReady(m_currentSayText);
             }
 
@@ -308,56 +392,79 @@ void PetController::OnUpdate()
                 && (m_ttsAudioPlayer != nullptr))
             {
                 qDebug() << "[TTS]   playing pre-synthesized audio:" << m_pendingAudioPath;
-                m_ttsAudioPlayer->Play(m_pendingAudioPath);
+
+                const bool playStarted = m_ttsAudioPlayer->Play(m_pendingAudioPath);
+
+                if (playStarted)
+                {
+                    m_sayingTimeoutTimer->start();
+                }
+                else
+                {
+                    qDebug() << "[TTS]   playback failed, requesting SAYING exit";
+                    m_stateMachine.RequestExitLoop();
+                    m_pendingAudioPath.clear();
+                }
+            }
+            else
+            {
+                qDebug() << "[TTS]   no pending audio, requesting SAYING exit";
+                m_stateMachine.RequestExitLoop();
             }
         }
         else
         {
+            if (previousState == PET_STATE::SAYING)
+            {
+                m_sayCooldownRemainingMs = SAY_TRIGGER_COOLDOWN_MS;
+            }
+
             // 离开 SAYING 状态时清理
+            if (m_sayingTimeoutTimer != nullptr)
+            {
+                m_sayingTimeoutTimer->stop();
+            }
+
             m_currentSayText.clear();
+            m_currentSaySource = SaySource::IdleRandom;
             m_pendingAudioPath.clear();
         }
     }
 
+    TryStartQueuedSay();
+
     // 处理 Say 动作：IdleTrigger 概率命中后，先合成音频再进入状态
     if (m_stateMachine.ConsumeSayPending())
     {
-        const QString sayAction = m_stateMachine.SelectRandomSayAction();
-
-        qDebug() << "[TTS] Say pending, action:" << sayAction;
-
-        if (sayAction.isEmpty())
+        if (m_sayCooldownRemainingMs > 0)
         {
-            qDebug() << "[TTS]   no say actions available, falling back to Idle";
-            m_stateMachine.IdleTrigger();
+            qDebug() << "[TTS] Say skipped by cooldown, remaining ms:"
+                     << m_sayCooldownRemainingMs;
+        }
+        else if (!m_pendingSayAction.isEmpty())
+        {
+            qDebug() << "[TTS] Say skipped because synthesis is already in flight:"
+                     << m_pendingSayAction;
         }
         else
         {
-            // 选取台词
-            m_currentSayText = SayDialog::GetRandomText(sayAction);
-            m_pendingAudioPath.clear();
+            const QString sayAction = m_stateMachine.SelectRandomSayAction();
 
-            qDebug() << "[TTS]   selected text:" << m_currentSayText;
+            qDebug() << "[TTS] Say pending, action:" << sayAction;
 
-            if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured()
-                && !m_currentSayText.isEmpty())
+            if (sayAction.isEmpty())
             {
-                // 停止当前播放
-                if ((m_ttsAudioPlayer != nullptr) && m_ttsAudioPlayer->IsPlaying())
+                qDebug() << "[TTS]   no say actions available, falling back to Idle";
+                m_stateMachine.IdleTrigger();
+            }
+            else
+            {
+                const QString sayText = SayDialog::GetRandomText(sayAction);
+
+                if (!StartSayText(sayText, SaySource::IdleRandom, sayAction))
                 {
-                    m_ttsAudioPlayer->Stop();
+                    qDebug() << "[TTS]   idle random say request rejected.";
                 }
-
-                // 唯一文件名
-                const QString uniqueName = QStringLiteral("say_%1.wav")
-                                           .arg(m_synthesisCounter);
-
-                m_pendingAudioPath = m_tempDir.filePath(uniqueName);
-                m_pendingSayAction = sayAction;
-                m_synthesisCounter += 1;
-
-                qDebug() << "[TTS]   synthesizing audio first, output:" << m_pendingAudioPath;
-                m_ttsClient->Synthesize(m_currentSayText, m_pendingAudioPath);
             }
         }
     }
@@ -465,6 +572,146 @@ QString PetController::GetRandomTouchBodyText()
     return texts.at(index);
 }
 
+bool PetController::StartSayText(const QString &text,
+                                 SaySource source,
+                                 const QString &preferredAction)
+{
+    const QString normalizedText = text.trimmed();
+
+    if (normalizedText.isEmpty())
+    {
+        return false;
+    }
+
+    QString sayAction = preferredAction.trimmed();
+
+    if (sayAction.isEmpty())
+    {
+        sayAction = m_stateMachine.SelectRandomSayAction();
+    }
+
+    if (sayAction.isEmpty())
+    {
+        qDebug() << "[TTS] Say request rejected because no say action is available.";
+        return false;
+    }
+
+    const PET_STATE currentState = m_stateMachine.GetCurrentState();
+    const bool canEnterSay = (currentState == PET_STATE::IDLE)
+                             || (currentState == PET_STATE::WALKING);
+
+    if (!canEnterSay || !m_pendingSayAction.isEmpty() || m_discardPendingSynthesis)
+    {
+        return QueueSayText(normalizedText, source);
+    }
+
+    m_currentSayText = normalizedText;
+    m_currentSaySource = source;
+    m_pendingSaySource = source;
+    m_pendingAudioPath.clear();
+
+    qDebug() << "[TTS] Say request accepted, source:" << SaySourceToString(source)
+             << "action:" << sayAction;
+    qDebug() << "[TTS]   selected text:" << m_currentSayText;
+
+    if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured())
+    {
+        if ((m_ttsAudioPlayer != nullptr) && m_ttsAudioPlayer->IsPlaying())
+        {
+            m_ttsAudioPlayer->Stop();
+        }
+
+        const QString uniqueName = QStringLiteral("say_%1.wav").arg(m_synthesisCounter);
+
+        m_pendingAudioPath = m_tempDir.filePath(uniqueName);
+        m_pendingSayAction = sayAction;
+        m_synthesisCounter += 1;
+
+        qDebug() << "[TTS]   synthesizing audio first, output:" << m_pendingAudioPath;
+        m_ttsClient->Synthesize(m_currentSayText, m_pendingAudioPath);
+        return true;
+    }
+
+    qDebug() << "[TTS]   TTS not configured, entering SAYING without audio";
+
+    if (!m_stateMachine.EnterSayState(sayAction))
+    {
+        m_currentSayText.clear();
+        return QueueSayText(normalizedText, source);
+    }
+
+    return true;
+}
+
+bool PetController::QueueSayText(const QString &text, SaySource source)
+{
+    const QString normalizedText = text.trimmed();
+
+    if (normalizedText.isEmpty())
+    {
+        return false;
+    }
+
+    const int newPriority = GetSaySourcePriority(source);
+    const bool hasQueuedSay = !m_queuedSayText.trimmed().isEmpty();
+
+    if (hasQueuedSay && (newPriority < GetSaySourcePriority(m_queuedSaySource)))
+    {
+        qDebug() << "[TTS] Say request dropped by priority, source:" << SaySourceToString(source);
+        return false;
+    }
+
+    m_queuedSayText = normalizedText;
+    m_queuedSayAction.clear();
+    m_queuedSaySource = source;
+
+    if (!m_pendingSayAction.isEmpty()
+        && (newPriority > GetSaySourcePriority(m_pendingSaySource)))
+    {
+        qDebug() << "[TTS] Higher priority say queued; discarding pending synthesis when it returns.";
+        m_discardPendingSynthesis = true;
+        m_pendingSayAction.clear();
+        m_pendingAudioPath.clear();
+        m_currentSayText.clear();
+    }
+
+    qDebug() << "[TTS] Say request queued, source:" << SaySourceToString(source);
+    return true;
+}
+
+void PetController::TryStartQueuedSay()
+{
+    if (m_queuedSayText.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    if (!m_pendingSayAction.isEmpty() || m_discardPendingSynthesis)
+    {
+        return;
+    }
+
+    const PET_STATE currentState = m_stateMachine.GetCurrentState();
+
+    if ((currentState != PET_STATE::IDLE) && (currentState != PET_STATE::WALKING))
+    {
+        return;
+    }
+
+    const QString text = m_queuedSayText;
+    const QString action = m_queuedSayAction;
+    const SaySource source = m_queuedSaySource;
+
+    m_queuedSayText.clear();
+    m_queuedSayAction.clear();
+    m_queuedSaySource = SaySource::IdleRandom;
+
+    if (!StartSayText(text, source, action))
+    {
+        QueueSayText(text, source);
+    }
+}
+
 void PetController::ClampPositionToScreen(QPoint &position) const
 {
     if (!m_screenBounds.isValid())
@@ -497,12 +744,39 @@ void PetController::OnTtsSynthesisFinished(const QString &filePath)
 {
     qDebug() << "[TTS] OnTtsSynthesisFinished, filePath:" << filePath;
 
+    if (m_discardPendingSynthesis)
+    {
+        qDebug() << "[TTS]   discarding obsolete synthesized audio.";
+
+        if (!filePath.isEmpty() && QFileInfo::exists(filePath))
+        {
+            QFile::remove(filePath);
+        }
+
+        m_discardPendingSynthesis = false;
+        m_pendingAudioPath.clear();
+        m_pendingSayAction.clear();
+        m_currentSayText.clear();
+        TryStartQueuedSay();
+        return;
+    }
+
     // 检查参数有效性
     if (filePath.isEmpty())
     {
         qDebug() << "[TTS]   FAILED - empty filePath (synthesis error or server error)";
         m_pendingAudioPath.clear();
-        m_pendingSayAction.clear();
+
+        if (!m_pendingSayAction.isEmpty() && !m_currentSayText.isEmpty())
+        {
+            const QString actionName = m_pendingSayAction;
+            m_pendingSayAction.clear();
+
+            if (!m_stateMachine.EnterSayState(actionName))
+            {
+                m_currentSayText.clear();
+            }
+        }
         return;
     }
 
@@ -511,7 +785,36 @@ void PetController::OnTtsSynthesisFinished(const QString &filePath)
     {
         qDebug() << "[TTS]   FAILED - audio file not found";
         m_pendingAudioPath.clear();
-        m_pendingSayAction.clear();
+
+        if (!m_pendingSayAction.isEmpty() && !m_currentSayText.isEmpty())
+        {
+            const QString actionName = m_pendingSayAction;
+            m_pendingSayAction.clear();
+
+            if (!m_stateMachine.EnterSayState(actionName))
+            {
+                m_currentSayText.clear();
+            }
+        }
+        return;
+    }
+
+    if (QFileInfo(filePath).size() <= 0)
+    {
+        qDebug() << "[TTS]   FAILED - audio file is empty";
+        QFile::remove(filePath);
+        m_pendingAudioPath.clear();
+
+        if (!m_pendingSayAction.isEmpty() && !m_currentSayText.isEmpty())
+        {
+            const QString actionName = m_pendingSayAction;
+            m_pendingSayAction.clear();
+
+            if (!m_stateMachine.EnterSayState(actionName))
+            {
+                m_currentSayText.clear();
+            }
+        }
         return;
     }
 
@@ -547,7 +850,11 @@ void PetController::OnTtsSynthesisFinished(const QString &filePath)
     if (m_ttsAudioPlayer != nullptr)
     {
         qDebug() << "[TTS]   playing audio directly...";
-        m_ttsAudioPlayer->Play(filePath);
+
+        if (!m_ttsAudioPlayer->Play(filePath))
+        {
+            OnAudioPlaybackFinished();
+        }
     }
 }
 
@@ -555,12 +862,19 @@ void PetController::OnAudioPlaybackFinished()
 {
     qDebug() << "[TTS] OnAudioPlaybackFinished - audio playback done";
 
+    if (m_sayingTimeoutTimer != nullptr)
+    {
+        m_sayingTimeoutTimer->stop();
+    }
+
     // 告诉状态机退出 SAYING 的 B 循环，进入 C→IDLE
     if (m_stateMachine.GetCurrentState() == PET_STATE::SAYING)
     {
         qDebug() << "[TTS]   requesting exit from SAYING loop";
         m_stateMachine.RequestExitLoop();
     }
+
+    m_sayCooldownRemainingMs = SAY_TRIGGER_COOLDOWN_MS;
 
     // 播放完毕后删除音频文件以节约磁盘空间
     if (!m_pendingAudioPath.isEmpty())
@@ -579,6 +893,32 @@ void PetController::OnAudioPlaybackFinished()
 
     // 清理 SAYING 相关状态
     m_currentSayText.clear();
+    m_currentSaySource = SaySource::IdleRandom;
+    TryStartQueuedSay();
+}
+
+void PetController::OnSayingTimeout()
+{
+    qDebug() << "[TTS] SAYING timeout reached, forcing exit";
+
+    if (m_ttsAudioPlayer != nullptr)
+    {
+        m_ttsAudioPlayer->Stop();
+    }
+
+    if (m_stateMachine.GetCurrentState() == PET_STATE::SAYING)
+    {
+        m_stateMachine.RequestExitLoop();
+    }
+
+    m_sayCooldownRemainingMs = SAY_TRIGGER_COOLDOWN_MS;
+
+    m_pendingAudioPath.clear();
+    m_pendingSayAction.clear();
+    m_discardPendingSynthesis = false;
+    m_currentSayText.clear();
+    m_currentSaySource = SaySource::IdleRandom;
+    TryStartQueuedSay();
 }
 
 } // namespace vpet

@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QJsonObject>
 #include <QSize>
 #include <QString>
 
@@ -23,6 +24,15 @@ enum class VISION_LLM_DETAIL_LEVEL
 };
 
 /**
+ * @brief 多模态模型配置档位
+ */
+enum class VISION_LLM_MODEL_PROFILE
+{
+    GPT,
+    MIMO_V2_5
+};
+
+/**
  * @brief 多模态 LLM 客户端配置
  */
 struct _tagVisionLlmConfig
@@ -30,6 +40,7 @@ struct _tagVisionLlmConfig
     QString baseUrl;   ///< OpenAI 兼容 API 根地址
     QString apiKey;    ///< API Key
     QString model;     ///< 支持视觉输入的模型 ID
+    VISION_LLM_MODEL_PROFILE profile = VISION_LLM_MODEL_PROFILE::GPT; ///< 当前模型档位
     QString defaultPrompt; ///< 默认截图识别提示词
     QString mediaType; ///< 默认图片媒体类型，如 image/png
     int timeoutMs = 30000; ///< HTTP 超时时间，单位毫秒
@@ -85,6 +96,19 @@ public:
      * @return 已配置返回 true
      */
     bool IsConfigured() const;
+
+    /**
+     * @brief 设置当前视觉模型档位
+     * @param[in] profile 目标模型档位
+     * @return 切换成功返回 true
+     */
+    bool SetActiveProfile(VISION_LLM_MODEL_PROFILE profile);
+
+    /**
+     * @brief 获取当前视觉模型档位
+     * @return 当前模型档位
+     */
+    VISION_LLM_MODEL_PROFILE GetActiveProfile() const;
 
     /**
      * @brief 识别一张 Base64 截图
@@ -186,8 +210,20 @@ private:
      * @return 提取成功返回 true
      */
     static bool ExtractAssistantContent(const QByteArray &responseData,
+                                        VISION_LLM_MODEL_PROFILE profile,
                                         QString &content,
                                         QString &errorMessage);
+
+    /**
+     * @brief 从多模态消息对象中提取文本
+     * @param[in] message 消息对象
+     * @param[in] profile 当前模型档位
+     * @param[out] errorMessage 错误描述
+     * @return 提取到的文本；失败时返回空字符串
+     */
+    static QString ExtractMessageText(const QJsonObject &message,
+                                      VISION_LLM_MODEL_PROFILE profile,
+                                      QString &errorMessage);
 
     /**
      * @brief 构造图片 data URL
@@ -203,10 +239,29 @@ private:
                                   QString &errorMessage);
 
 private:
+    /**
+     * @brief 根据当前档位选择活动配置
+     * @param[in] profile 模型档位
+     * @return 对应配置可用返回 true
+     */
+    bool ActivateProfileConfig(VISION_LLM_MODEL_PROFILE profile);
+
+    /**
+     * @brief 从模型标识推断档位
+     * @param[in] modelName 模型标识
+     * @return 推断出的模型档位
+     */
+    static VISION_LLM_MODEL_PROFILE InferProfileFromModelName(const QString &modelName);
+
     QNetworkAccessManager *m_networkManager; ///< HTTP 网络管理器
+    _tagVisionLlmConfig m_gptConfig;         ///< GPT 配置
+    _tagVisionLlmConfig m_mimoConfig;        ///< MiMo 配置
     _tagVisionLlmConfig m_config;            ///< 多模态 LLM 配置信息
     _tagVisionLlmRequestOptions m_defaultOptions; ///< 默认请求参数
     bool m_isConfigured;                     ///< 是否已配置
+    bool m_hasGptConfig;                     ///< GPT 配置是否可用
+    bool m_hasMimoConfig;                    ///< MiMo 配置是否可用
+    VISION_LLM_MODEL_PROFILE m_activeProfile; ///< 当前激活档位
     int m_nextRequestId;                     ///< 下一个请求 ID
 };
 

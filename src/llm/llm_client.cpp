@@ -1,7 +1,10 @@
 #include "vpet/llm/llm_client.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -29,6 +32,7 @@ constexpr double MIN_TOP_P = 0.0;
 constexpr double MAX_TOP_P = 1.0;
 constexpr double MIN_PENALTY = -2.0;
 constexpr double MAX_PENALTY = 2.0;
+const QString SYSTEM_PROMPT_FILE_NAME = QStringLiteral("context.md");
 
 } // anonymous namespace
 
@@ -36,6 +40,7 @@ LlmClient::LlmClient(QObject *parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
     , m_config()
+    , m_systemPrompt()
     , m_isConfigured(false)
     , m_nextRequestId(1)
 {
@@ -82,7 +87,19 @@ bool LlmClient::LoadConfig(const QString &configPath)
     config.model = object.value(QStringLiteral("model")).toString();
     config.timeoutMs = object.value(QStringLiteral("timeout_ms")).toInt(DEFAULT_TIMEOUT_MS);
 
-    return SetConfig(config);
+    if (!SetConfig(config))
+    {
+        return false;
+    }
+
+    const QString systemPromptPath = FindSystemPromptPath(configPath);
+
+    if (!systemPromptPath.isEmpty())
+    {
+        LoadSystemPrompt(systemPromptPath);
+    }
+
+    return true;
 }
 
 bool LlmClient::SetConfig(const _tagLlmConfig &config)
@@ -109,6 +126,36 @@ bool LlmClient::IsConfigured() const
     return m_isConfigured;
 }
 
+bool LlmClient::LoadSystemPrompt(const QString &contextPath)
+{
+    if (contextPath.trimmed().isEmpty())
+    {
+        emit ChatFailed(-1, QStringLiteral("LLM system prompt path is empty."), 0);
+        return false;
+    }
+
+    QFile file(contextPath);
+
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        emit ChatFailed(-1, QStringLiteral("Failed to open LLM system prompt file."), 0);
+        return false;
+    }
+
+    const QString systemPrompt = QString::fromUtf8(file.readAll()).trimmed();
+    file.close();
+
+    if (systemPrompt.isEmpty())
+    {
+        emit ChatFailed(-1, QStringLiteral("LLM system prompt is empty."), 0);
+        return false;
+    }
+
+    m_systemPrompt = systemPrompt;
+
+    return true;
+}
+
 int LlmClient::SendChat(const QVector<_tagLlmMessage> &messages,
                         const _tagLlmRequestOptions &options)
 {
@@ -124,9 +171,20 @@ int LlmClient::SendChat(const QVector<_tagLlmMessage> &messages,
         return -1;
     }
 
+    QVector<_tagLlmMessage> requestMessages = messages;
+
+    if (!m_systemPrompt.isEmpty() && !HasSystemMessage(requestMessages))
+    {
+        _tagLlmMessage systemMessage;
+        systemMessage.role = LLM_MESSAGE_ROLE::SYSTEM;
+        systemMessage.content = m_systemPrompt;
+
+        requestMessages.prepend(systemMessage);
+    }
+
     QJsonArray messageArray;
 
-    for (const _tagLlmMessage &message : messages)
+    for (const _tagLlmMessage &message : requestMessages)
     {
         if (message.content.trimmed().isEmpty())
         {
@@ -388,6 +446,59 @@ bool LlmClient::ExtractAssistantContent(const QByteArray &responseData,
     }
 
     return true;
+}
+
+QString LlmClient::FindSystemPromptPath(const QString &configPath)
+{
+    if (configPath.trimmed().isEmpty())
+    {
+        return QString();
+    }
+
+    const QFileInfo configFileInfo(configPath);
+    QVector<QString> candidatePaths;
+
+    if (!configFileInfo.absolutePath().isEmpty())
+    {
+        candidatePaths.append(QDir(configFileInfo.absolutePath()).filePath(SYSTEM_PROMPT_FILE_NAME));
+    }
+
+    const QString applicationPath = QCoreApplication::applicationDirPath();
+
+    if (!applicationPath.isEmpty())
+    {
+        candidatePaths.append(QDir(applicationPath).filePath(SYSTEM_PROMPT_FILE_NAME));
+    }
+
+    candidatePaths.append(QDir::current().filePath(SYSTEM_PROMPT_FILE_NAME));
+
+    for (const QString &candidatePath : candidatePaths)
+    {
+        if (QFileInfo::exists(candidatePath) && QFileInfo(candidatePath).isFile())
+        {
+            return candidatePath;
+        }
+    }
+
+    return QString();
+}
+
+bool LlmClient::HasSystemMessage(const QVector<_tagLlmMessage> &messages)
+{
+    if (messages.isEmpty())
+    {
+        return false;
+    }
+
+    for (const _tagLlmMessage &message : messages)
+    {
+        if (message.role == LLM_MESSAGE_ROLE::SYSTEM)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 } // namespace vpet

@@ -1,11 +1,49 @@
 #include "main_window.h"
+#include "vpet/agent/agent_runtime.h"
 #include "vpet/splash_window.h"
 #include "vpet/tts_server_manager.h"
 
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
+#include <QStringList>
 #include <QTimer>
+
+namespace
+{
+
+const QString AGENT_DAG_CONFIG_FILE_NAME = QStringLiteral("agent_dag_structure.json");
+
+/**
+ * @brief 查找 Agent DAG 配置文件
+ * @return 配置文件绝对路径；未找到时返回空字符串
+ */
+QString FindAgentDagConfigPath()
+{
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    const QStringList candidatePaths =
+    {
+        exeDir + QStringLiteral("/") + AGENT_DAG_CONFIG_FILE_NAME,
+        QDir::currentPath() + QStringLiteral("/") + AGENT_DAG_CONFIG_FILE_NAME,
+        exeDir + QStringLiteral("/../") + AGENT_DAG_CONFIG_FILE_NAME,
+        exeDir + QStringLiteral("/../../") + AGENT_DAG_CONFIG_FILE_NAME
+    };
+
+    for (const QString &candidatePath : candidatePaths)
+    {
+        if (QFileInfo::exists(candidatePath))
+        {
+            return QFileInfo(candidatePath).absoluteFilePath();
+        }
+    }
+
+    return QString();
+}
+
+} // anonymous namespace
 
 /**
  * @brief 获取动画资源根目录
@@ -105,8 +143,36 @@ int main(int argc, char *argv[])
     // 隐藏启动画面
     splashWindow.hide();
 
+    // 启动 Agent DAG 运行时，后续语音输入将进入节点化链路。
+    vpet::AgentRuntime agentRuntime;
+    QString agentErrorMessage;
+
+    if (!agentRuntime.LoadDefaultLlmConfig(agentErrorMessage))
+    {
+        qWarning() << "[Agent]" << agentErrorMessage
+                   << "Voice input will stop before LLM request.";
+    }
+
+    if (!agentRuntime.LoadDefaultVisionLlmConfig(agentErrorMessage))
+    {
+        qWarning() << "[Agent]" << agentErrorMessage
+                   << "Vision LLM DAG node will be skipped before request.";
+    }
+
+    const QString agentDagConfigPath = FindAgentDagConfigPath();
+
+    if (agentDagConfigPath.isEmpty())
+    {
+        qWarning() << "[Agent] agent_dag_structure.json not found. Agent runtime disabled.";
+    }
+    else if (!agentRuntime.Start(agentDagConfigPath, agentErrorMessage))
+    {
+        qWarning() << "[Agent] Failed to start runtime:" << agentErrorMessage;
+    }
+
     // 创建并初始化主窗口
     vpet::MainWindow window;
+    window.SetAgentRuntime(&agentRuntime);
 
     if (!window.Initialize(GetAnimationBasePath()))
     {

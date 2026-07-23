@@ -5,14 +5,19 @@
 
 #include <QByteArray>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPoint>
 #include <QWidget>
 
 namespace vpet
 {
 
+class AgentRuntime;
 class ChatBubbleWindow;
-class ScreenshotSensor;
+class PerceptionPipeline;
+class VoiceInputManager;
+class VisionLlmClient;
 
 /**
  * @brief 桌宠主窗口
@@ -43,6 +48,12 @@ public:
      */
     bool Initialize(const QString &animationBasePath);
 
+    /**
+     * @brief 设置 Agent 运行时
+     * @param[in] agentRuntime Agent 运行时对象
+     */
+    void SetAgentRuntime(AgentRuntime *agentRuntime);
+
 signals:
     /**
      * @brief 视觉截图数据就绪信号
@@ -69,6 +80,27 @@ protected:
      * @param[in] event 鼠标事件
      */
     void mouseReleaseEvent(QMouseEvent *event) override;
+
+    /**
+     * @brief 键盘按下事件
+     * @param[in] event 键盘事件
+     */
+    void keyPressEvent(QKeyEvent *event) override;
+
+    /**
+     * @brief 键盘释放事件
+     * @param[in] event 键盘事件
+     */
+    void keyReleaseEvent(QKeyEvent *event) override;
+
+    /**
+     * @brief 处理平台原生事件
+     * @param[in] eventType 事件类型
+     * @param[in] message 原生事件消息
+     * @param[out] result 原生事件结果
+     * @return 已处理返回 true
+     */
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private slots:
     /**
@@ -115,22 +147,95 @@ private slots:
     void OnSayTextReady(const QString &text);
 
     /**
-     * @brief 截图完成槽
-     * @param[in] base64Data Base64 图像数据
-     * @param[in] frameCount 截图序号
-     * @param[in] frameSize 截图尺寸
+     * @brief 感知数据就绪槽
+     * @param[in] encodedData 编码后的图像数据
+     * @param[in] frameId 帧序号
      */
-    void OnScreenshotCaptured(const QByteArray &base64Data,
-                              int frameCount,
-                              const QSize &frameSize);
+    void OnPerceptionDataReady(const QByteArray &encodedData, int frameId);
 
     /**
-     * @brief 截图错误槽
+     * @brief 感知错误槽
      * @param[in] message 错误描述
      */
-    void OnScreenshotError(const QString &message);
+    void OnPerceptionError(const QString &message);
+
+    /**
+     * @brief 多模态截图识别完成槽
+     * @param[in] requestId 请求 ID
+     * @param[in] content 识别结果
+     */
+    void OnVisionAnalysisCompleted(int requestId, const QString &content);
+
+    /**
+     * @brief 多模态截图识别失败槽
+     * @param[in] requestId 请求 ID
+     * @param[in] message 错误描述
+     * @param[in] statusCode HTTP 状态码
+     */
+    void OnVisionAnalysisFailed(int requestId, const QString &message, int statusCode);
+
+    /**
+     * @brief 语音识别完成槽
+     * @param[in] text 识别文本
+     */
+    void OnVoiceTranscriptionCompleted(const QString &text);
+
+    /**
+     * @brief 语音识别失败槽
+     * @param[in] message 错误描述
+     */
+    void OnVoiceTranscriptionFailed(const QString &message);
+
+    /**
+     * @brief Agent 日志槽
+     * @param[in] message 日志内容
+     */
+    void OnAgentLogMessage(const QString &message);
+
+    /**
+     * @brief Agent LLM 回复完成槽
+     * @param[in] requestId 请求 ID
+     * @param[in] content 回复文本
+     */
+    void OnAgentLlmResponseReceived(int requestId, const QString &content);
+
+    /**
+     * @brief Agent LLM 请求失败槽
+     * @param[in] requestId 请求 ID
+     * @param[in] message 错误描述
+     * @param[in] statusCode HTTP 状态码
+     */
+    void OnAgentLlmRequestFailed(int requestId, const QString &message, int statusCode);
 
 private:
+    /**
+     * @brief 显示桌宠右键菜单
+     * @param[in] globalPosition 菜单弹出全局坐标
+     */
+    void ShowPetContextMenu(const QPoint &globalPosition);
+
+    /**
+     * @brief 切换语音录制状态
+     */
+    void ToggleVoiceRecording();
+
+    /**
+     * @brief 注册系统全局语音热键
+     * @return 注册成功返回 true
+     */
+    bool RegisterVoiceHotkey();
+
+    /**
+     * @brief 注销系统全局语音热键
+     */
+    void UnregisterVoiceHotkey();
+
+    /**
+     * @brief 将文本输入提交到 Agent/LLM 链路
+     * @param[in] text 用户文本
+     */
+    void SubmitTextToAgent(const QString &text);
+
     /**
      * @brief 根据图片尺寸更新命中区域
      * @param[in] imageSize 图片尺寸
@@ -147,8 +252,13 @@ private:
     QLabel *m_imageLabel;                 ///< 帧显示标签
     QLabel *m_bubbleLabel;                ///< 气泡标签
     ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
-    ScreenshotSensor *m_screenshotSensor; ///< 自动截图传感器
+    PerceptionPipeline *m_perceptionPipeline; ///< 视觉感知管道
+    VisionLlmClient *m_visionLlmClient;    ///< 多模态截图识别客户端
+    VoiceInputManager *m_voiceInputManager; ///< 按键语音输入管理器
+    AgentRuntime *m_agentRuntime;          ///< Agent 运行时对象，不持有所有权
     QSize m_currentImageSize;             ///< 当前图片尺寸
+    bool m_visionRequestInFlight;          ///< 多模态请求是否正在等待返回
+    bool m_isVoiceHotkeyRegistered;        ///< 系统全局语音热键是否已注册
 };
 
 } // namespace vpet

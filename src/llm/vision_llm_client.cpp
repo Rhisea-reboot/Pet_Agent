@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QDebug>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -32,9 +33,14 @@ constexpr qsizetype MAX_BASE64_IMAGE_BYTES = 30000000;
 VisionLlmClient::VisionLlmClient(QObject *parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
+    , m_gptConfig()
+    , m_mimoConfig()
     , m_config()
     , m_defaultOptions()
     , m_isConfigured(false)
+    , m_hasGptConfig(false)
+    , m_hasMimoConfig(false)
+    , m_activeProfile(VISION_LLM_MODEL_PROFILE::GPT)
     , m_nextRequestId(1)
 {
     connect(m_networkManager, &QNetworkAccessManager::finished,
@@ -78,6 +84,7 @@ bool VisionLlmClient::LoadConfig(const QString &configPath)
     config.baseUrl = object.value(QStringLiteral("base_url")).toString();
     config.apiKey = object.value(QStringLiteral("api_key")).toString();
     config.model = object.value(QStringLiteral("model")).toString();
+    config.profile = InferProfileFromModelName(config.model);
     config.defaultPrompt = object.value(QStringLiteral("default_prompt")).toString();
     config.mediaType = object.value(QStringLiteral("media_type")).toString();
     config.timeoutMs = object.value(QStringLiteral("timeout_ms")).toInt(DEFAULT_TIMEOUT_MS);
@@ -92,6 +99,48 @@ bool VisionLlmClient::LoadConfig(const QString &configPath)
     if (configured)
     {
         m_defaultOptions = NormalizeOptions(options);
+
+        const _tagVisionLlmConfig gptCandidate = [config]() -> _tagVisionLlmConfig
+        {
+            _tagVisionLlmConfig candidate;
+            candidate.baseUrl = qEnvironmentVariable("OPENAI_BASE_URL",
+                                                     QStringLiteral("https://api.openai.com/v1"));
+            candidate.apiKey = qEnvironmentVariable("OPENAI_API_KEY");
+            candidate.model = qEnvironmentVariable("OPENAI_MODEL", QStringLiteral("gpt-4o"));
+            candidate.profile = VISION_LLM_MODEL_PROFILE::GPT;
+            candidate.defaultPrompt = config.defaultPrompt;
+            candidate.mediaType = config.mediaType;
+            candidate.timeoutMs = config.timeoutMs;
+            return candidate;
+        }();
+
+        const _tagVisionLlmConfig mimoCandidate = [config]() -> _tagVisionLlmConfig
+        {
+            _tagVisionLlmConfig candidate;
+            candidate.baseUrl = QStringLiteral("https://api.xiaomimimo.com/v1");
+            candidate.apiKey = qEnvironmentVariable("MIMO_API_KEY");
+            candidate.model = QStringLiteral("mimo-v2.5");
+            candidate.profile = VISION_LLM_MODEL_PROFILE::MIMO_V2_5;
+            candidate.defaultPrompt = config.defaultPrompt;
+            candidate.mediaType = config.mediaType;
+            candidate.timeoutMs = config.timeoutMs;
+            return candidate;
+        }();
+
+        QString errorMessage;
+        _tagVisionLlmConfig normalizedCandidate;
+
+        if (NormalizeConfig(gptCandidate, normalizedCandidate, errorMessage))
+        {
+            m_gptConfig = normalizedCandidate;
+            m_hasGptConfig = true;
+        }
+
+        if (NormalizeConfig(mimoCandidate, normalizedCandidate, errorMessage))
+        {
+            m_mimoConfig = normalizedCandidate;
+            m_hasMimoConfig = true;
+        }
     }
 
     return configured;
@@ -110,6 +159,18 @@ bool VisionLlmClient::SetConfig(const _tagVisionLlmConfig &config)
         return false;
     }
 
+    if (normalizedConfig.profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
+    {
+        m_mimoConfig = normalizedConfig;
+        m_hasMimoConfig = true;
+    }
+    else
+    {
+        m_gptConfig = normalizedConfig;
+        m_hasGptConfig = true;
+    }
+
+    m_activeProfile = normalizedConfig.profile;
     m_config = normalizedConfig;
     m_defaultOptions = NormalizeOptions(m_defaultOptions);
     m_isConfigured = true;
@@ -120,6 +181,23 @@ bool VisionLlmClient::SetConfig(const _tagVisionLlmConfig &config)
 bool VisionLlmClient::IsConfigured() const
 {
     return m_isConfigured;
+}
+
+bool VisionLlmClient::SetActiveProfile(VISION_LLM_MODEL_PROFILE profile)
+{
+    if (!ActivateProfileConfig(profile))
+    {
+        return false;
+    }
+
+    m_activeProfile = profile;
+    qDebug() << "[VisionLLM] Active model profile changed:" << m_config.model;
+    return true;
+}
+
+VISION_LLM_MODEL_PROFILE VisionLlmClient::GetActiveProfile() const
+{
+    return m_activeProfile;
 }
 
 int VisionLlmClient::AnalyzeScreenshot(const QString &prompt,
@@ -150,11 +228,6 @@ int VisionLlmClient::AnalyzeScreenshot(const QString &prompt,
 
     const _tagVisionLlmRequestOptions normalizedOptions = NormalizeOptions(options);
     QJsonArray contentArray;
-    QJsonObject textObject;
-    textObject[QStringLiteral("type")] = QStringLiteral("text");
-    textObject[QStringLiteral("text")] = prompt;
-    contentArray.append(textObject);
-
     QJsonObject imageUrlObject;
     imageUrlObject[QStringLiteral("url")] = imageDataUrl;
     imageUrlObject[QStringLiteral("detail")] = DetailLevelToString(normalizedOptions.detailLevel);
@@ -164,18 +237,42 @@ int VisionLlmClient::AnalyzeScreenshot(const QString &prompt,
     imageObject[QStringLiteral("image_url")] = imageUrlObject;
     contentArray.append(imageObject);
 
+    QJsonObject textObject;
+    textObject[QStringLiteral("type")] = QStringLiteral("text");
+    textObject[QStringLiteral("text")] = prompt;
+    contentArray.append(textObject);
+
     QJsonObject messageObject;
     messageObject[QStringLiteral("role")] = QStringLiteral("user");
     messageObject[QStringLiteral("content")] = contentArray;
 
     QJsonArray messageArray;
+
+    if (m_config.profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
+    {
+        QJsonObject systemMessageObject;
+        systemMessageObject[QStringLiteral("role")] = QStringLiteral("system");
+        systemMessageObject[QStringLiteral("content")] = QStringLiteral(
+            "You are MiMo, an AI assistant developed by Xiaomi.");
+        messageArray.append(systemMessageObject);
+    }
+
     messageArray.append(messageObject);
 
     QJsonObject body;
     body[QStringLiteral("model")] = m_config.model;
     body[QStringLiteral("messages")] = messageArray;
     body[QStringLiteral("temperature")] = normalizedOptions.temperature;
-    body[QStringLiteral("max_tokens")] = normalizedOptions.maxTokens;
+
+    if (m_config.profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
+    {
+        body[QStringLiteral("max_completion_tokens")] = normalizedOptions.maxTokens;
+    }
+    else
+    {
+        body[QStringLiteral("max_tokens")] = normalizedOptions.maxTokens;
+    }
+
     body[QStringLiteral("stream")] = false;
 
     const QByteArray bodyData = QJsonDocument(body).toJson(QJsonDocument::Compact);
@@ -258,6 +355,11 @@ void VisionLlmClient::OnReplyFinished(QNetworkReply *reply)
     const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray responseData = reply->readAll();
 
+    qDebug().noquote() << QStringLiteral("[VisionLLM] Full response JSON, request: %1 status: %2 body: %3")
+                          .arg(requestId)
+                          .arg(statusCode)
+                          .arg(QString::fromUtf8(responseData));
+
     if (requestId <= 0)
     {
         emit AnalysisFailed(-1,
@@ -285,7 +387,7 @@ void VisionLlmClient::OnReplyFinished(QNetworkReply *reply)
     QString content;
     QString errorMessage;
 
-    if (!ExtractAssistantContent(responseData, content, errorMessage))
+    if (!ExtractAssistantContent(responseData, m_config.profile, content, errorMessage))
     {
         emit AnalysisFailed(requestId, errorMessage, statusCode);
         return;
@@ -302,6 +404,7 @@ bool VisionLlmClient::NormalizeConfig(const _tagVisionLlmConfig &config,
     normalizedConfig.baseUrl = normalizedConfig.baseUrl.trimmed();
     normalizedConfig.apiKey = normalizedConfig.apiKey.trimmed();
     normalizedConfig.model = normalizedConfig.model.trimmed();
+    normalizedConfig.profile = InferProfileFromModelName(normalizedConfig.model);
     normalizedConfig.defaultPrompt = normalizedConfig.defaultPrompt.trimmed();
     normalizedConfig.mediaType = normalizedConfig.mediaType.trimmed().toLower();
 
@@ -417,6 +520,7 @@ VISION_LLM_DETAIL_LEVEL VisionLlmClient::StringToDetailLevel(const QString &deta
 }
 
 bool VisionLlmClient::ExtractAssistantContent(const QByteArray &responseData,
+                                              VISION_LLM_MODEL_PROFILE profile,
                                               QString &content,
                                               QString &errorMessage)
 {
@@ -444,15 +548,37 @@ bool VisionLlmClient::ExtractAssistantContent(const QByteArray &responseData,
 
     const QJsonObject firstChoice = choices.at(0).toObject();
     const QJsonObject message = firstChoice.value(QStringLiteral("message")).toObject();
-    content = message.value(QStringLiteral("content")).toString();
+    content = ExtractMessageText(message, profile, errorMessage);
 
     if (content.isEmpty())
     {
-        errorMessage = QStringLiteral("Vision LLM response content is empty.");
+        if (errorMessage.isEmpty())
+        {
+            errorMessage = QStringLiteral("Vision LLM response content is empty.");
+        }
+
         return false;
     }
 
     return true;
+}
+
+QString VisionLlmClient::ExtractMessageText(const QJsonObject &message,
+                                            VISION_LLM_MODEL_PROFILE profile,
+                                            QString &errorMessage)
+{
+    if (message.isEmpty())
+    {
+        errorMessage = QStringLiteral("Vision LLM response message is empty.");
+        return QString();
+    }
+
+    if (profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
+    {
+        return message.value(QStringLiteral("reasoning_content")).toString();
+    }
+
+    return message.value(QStringLiteral("content")).toString();
 }
 
 bool VisionLlmClient::BuildImageDataUrl(const QByteArray &base64Image,
@@ -489,6 +615,44 @@ bool VisionLlmClient::BuildImageDataUrl(const QByteArray &base64Image,
                                                        QString::fromLatin1(base64Image));
 
     return true;
+}
+
+bool VisionLlmClient::ActivateProfileConfig(VISION_LLM_MODEL_PROFILE profile)
+{
+    if (profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
+    {
+        if (!m_hasMimoConfig)
+        {
+            emit AnalysisFailed(-1, QStringLiteral("MiMo vision model config is not available."), 0);
+            return false;
+        }
+
+        m_config = m_mimoConfig;
+        m_isConfigured = true;
+        return true;
+    }
+
+    if (!m_hasGptConfig)
+    {
+        emit AnalysisFailed(-1, QStringLiteral("GPT vision model config is not available."), 0);
+        return false;
+    }
+
+    m_config = m_gptConfig;
+    m_isConfigured = true;
+    return true;
+}
+
+VISION_LLM_MODEL_PROFILE VisionLlmClient::InferProfileFromModelName(const QString &modelName)
+{
+    const QString normalizedModelName = modelName.trimmed().toLower();
+
+    if (normalizedModelName == QStringLiteral("mimo-v2.5"))
+    {
+        return VISION_LLM_MODEL_PROFILE::MIMO_V2_5;
+    }
+
+    return VISION_LLM_MODEL_PROFILE::GPT;
 }
 
 } // namespace vpet

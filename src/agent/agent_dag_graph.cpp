@@ -13,7 +13,7 @@ namespace vpet
 AgentDagGraph::AgentDagGraph()
     : m_adjacentList()
     , m_inDegree()
-    , m_nodeNames()
+    , m_nodes()
     , m_nodeIndexMap()
 {
 }
@@ -94,14 +94,15 @@ bool AgentDagGraph::LoadFromJsonData(const QByteArray &jsonData, QString &errorM
 
     for (const QJsonValue &nodeValue : nodesArray)
     {
-        if (!nodeValue.isString())
+        _tagAgentDagNode node;
+
+        if (!ParseNode(nodeValue, node, errorMessage))
         {
             Clear();
-            errorMessage = QStringLiteral("Agent DAG node entry is not a string.");
             return false;
         }
 
-        if (!AddNode(nodeValue.toString(), errorMessage))
+        if (!AddNode(node, errorMessage))
         {
             Clear();
             return false;
@@ -145,7 +146,7 @@ bool AgentDagGraph::TopologicalSort(QVector<QString> &order, QString &errorMessa
 {
     order.clear();
 
-    if (m_nodeNames.isEmpty())
+    if (m_nodes.isEmpty())
     {
         errorMessage = QStringLiteral("Agent DAG graph is empty.");
         return false;
@@ -165,7 +166,7 @@ bool AgentDagGraph::TopologicalSort(QVector<QString> &order, QString &errorMessa
     while (!zeroInDegreeQueue.isEmpty())
     {
         const int currentIndex = zeroInDegreeQueue.dequeue();
-        order.append(m_nodeNames.at(currentIndex));
+        order.append(m_nodes.at(currentIndex).id);
 
         for (const _tagAgentDagEdge &edge : m_adjacentList.at(currentIndex))
         {
@@ -187,7 +188,7 @@ bool AgentDagGraph::TopologicalSort(QVector<QString> &order, QString &errorMessa
         }
     }
 
-    if (order.size() != m_nodeNames.size())
+    if (order.size() != m_nodes.size())
     {
         errorMessage = QStringLiteral("Agent DAG contains a cycle.");
         order.clear();
@@ -199,24 +200,55 @@ bool AgentDagGraph::TopologicalSort(QVector<QString> &order, QString &errorMessa
 
 bool AgentDagGraph::IsEmpty() const
 {
-    return m_nodeNames.isEmpty();
+    return m_nodes.isEmpty();
 }
 
 int AgentDagGraph::GetNodeCount() const
 {
-    return m_nodeNames.size();
+    return m_nodes.size();
 }
 
 QVector<QString> AgentDagGraph::GetNodeNames() const
 {
-    return m_nodeNames;
+    QVector<QString> nodeNames;
+    nodeNames.reserve(m_nodes.size());
+
+    for (const _tagAgentDagNode &node : m_nodes)
+    {
+        nodeNames.append(node.id);
+    }
+
+    return nodeNames;
+}
+
+bool AgentDagGraph::GetNode(const QString &nodeId, _tagAgentDagNode &node) const
+{
+    const QString normalizedNodeId = nodeId.trimmed();
+
+    if (normalizedNodeId.isEmpty() || !m_nodeIndexMap.contains(normalizedNodeId))
+    {
+        node = _tagAgentDagNode();
+        return false;
+    }
+
+    const int nodeIndex = m_nodeIndexMap.value(normalizedNodeId);
+
+    if ((nodeIndex < 0) || (nodeIndex >= m_nodes.size()))
+    {
+        node = _tagAgentDagNode();
+        return false;
+    }
+
+    node = m_nodes.at(nodeIndex);
+
+    return true;
 }
 
 void AgentDagGraph::Clear()
 {
     m_adjacentList.clear();
     m_inDegree.clear();
-    m_nodeNames.clear();
+    m_nodes.clear();
     m_nodeIndexMap.clear();
 }
 
@@ -232,29 +264,38 @@ void AgentDagGraph::Reset(int nodeCount)
     m_adjacentList.resize(nodeCount);
     m_inDegree.clear();
     m_inDegree.resize(nodeCount);
-    m_nodeNames.clear();
-    m_nodeNames.reserve(nodeCount);
+    m_nodes.clear();
+    m_nodes.reserve(nodeCount);
     m_nodeIndexMap.clear();
 }
 
-bool AgentDagGraph::AddNode(const QString &nodeName, QString &errorMessage)
+bool AgentDagGraph::AddNode(const _tagAgentDagNode &node, QString &errorMessage)
 {
-    const QString normalizedNodeName = nodeName.trimmed();
+    _tagAgentDagNode normalizedNode = node;
+    normalizedNode.id = node.id.trimmed();
+    normalizedNode.type = node.type.trimmed();
 
-    if (normalizedNodeName.isEmpty())
+    if (normalizedNode.id.isEmpty())
     {
-        errorMessage = QStringLiteral("Agent DAG node name is empty.");
+        errorMessage = QStringLiteral("Agent DAG node id is empty.");
         return false;
     }
 
-    if (m_nodeIndexMap.contains(normalizedNodeName))
+    if (normalizedNode.type.isEmpty())
+    {
+        errorMessage = QStringLiteral("Agent DAG node type is empty: %1").arg(
+                           normalizedNode.id);
+        return false;
+    }
+
+    if (m_nodeIndexMap.contains(normalizedNode.id))
     {
         errorMessage = QStringLiteral("Agent DAG contains duplicate node: %1").arg(
-                           normalizedNodeName);
+                           normalizedNode.id);
         return false;
     }
 
-    const int nodeIndex = m_nodeNames.size();
+    const int nodeIndex = m_nodes.size();
 
     if (nodeIndex >= m_adjacentList.size())
     {
@@ -262,8 +303,49 @@ bool AgentDagGraph::AddNode(const QString &nodeName, QString &errorMessage)
         return false;
     }
 
-    m_nodeNames.append(normalizedNodeName);
-    m_nodeIndexMap.insert(normalizedNodeName, nodeIndex);
+    m_nodes.append(normalizedNode);
+    m_nodeIndexMap.insert(normalizedNode.id, nodeIndex);
+
+    return true;
+}
+
+bool AgentDagGraph::ParseNode(const QJsonValue &nodeValue,
+                              _tagAgentDagNode &node,
+                              QString &errorMessage) const
+{
+    node = _tagAgentDagNode();
+
+    if (nodeValue.isString())
+    {
+        node.id = nodeValue.toString().trimmed();
+        node.type = node.id;
+        return true;
+    }
+
+    if (!nodeValue.isObject())
+    {
+        errorMessage = QStringLiteral("Agent DAG node entry is not a string or object.");
+        return false;
+    }
+
+    const QJsonObject nodeObject = nodeValue.toObject();
+    node.id = nodeObject.value(QStringLiteral("id")).toString().trimmed();
+    node.type = nodeObject.value(QStringLiteral("type")).toString().trimmed();
+
+    if (nodeObject.contains(QStringLiteral("config")))
+    {
+        const QJsonValue configValue = nodeObject.value(QStringLiteral("config"));
+
+        if (!configValue.isObject())
+        {
+            errorMessage = QStringLiteral("Agent DAG node config is not an object: %1").arg(
+                               node.id);
+            node = _tagAgentDagNode();
+            return false;
+        }
+
+        node.config = configValue.toObject();
+    }
 
     return true;
 }

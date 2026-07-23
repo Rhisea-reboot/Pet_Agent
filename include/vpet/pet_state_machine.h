@@ -45,7 +45,7 @@ public:
     /**
      * @brief Idle 定时触发
      *
-     * 在 Idle、Walking、Saying 任一待机状态下生效，按概率在三种待机动画间切换。
+     * 在 Idle、Walking 状态下生效，按概率在待机动作间切换。
      *
      * @return 事件被处理返回 true
      */
@@ -84,7 +84,7 @@ public:
     /**
      * @brief 请求退出当前 B 段循环
      *
-     * 当 B 段播完当前循环后进入 C 段（若存在），随后回到 Idle。
+     * 可在 A 段或 B 段排队退出；当 B 段播完当前循环后进入 C 段（若存在），随后回到 Idle。
      *
      * @return 当前处于 B 段并收到信号返回 true
      */

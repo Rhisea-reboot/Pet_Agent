@@ -4,7 +4,8 @@
 #include <QObject>
 #include <QString>
 
-class QSoundEffect;
+class QAudioOutput;
+class QMediaPlayer;
 
 namespace vpet
 {
@@ -12,8 +13,7 @@ namespace vpet
 /**
  * @brief TTS 音频播放器
  *
- * 使用 QSoundEffect 播放 WAV 音频文件，
- * 支持低延迟播放与播放完成信号通知。
+ * 使用 QMediaPlayer 播放 TTS 音频文件，支持播放完成信号通知。
  */
 class TtsAudioPlayer : public QObject
 {
@@ -33,9 +33,10 @@ public:
 
     /**
      * @brief 播放音频文件
-     * @param[in] filePath WAV 文件路径，不得为空
+     * @param[in] filePath 音频文件路径，不得为空
+     * @return 播放请求成功发出返回 true
      */
-    void Play(const QString &filePath);
+    bool Play(const QString &filePath);
 
     /**
      * @brief 停止当前播放
@@ -55,7 +56,8 @@ signals:
     void PlaybackFinished();
 
 private:
-    QSoundEffect *m_soundEffect; ///< 音效播放器
+    QMediaPlayer *m_mediaPlayer; ///< 媒体播放器
+    QAudioOutput *m_audioOutput; ///< 音频输出设备
 };
 
 } // namespace vpet
