@@ -92,6 +92,42 @@ public:
      */
     bool GetNode(const QString &nodeId, _tagAgentDagNode &node) const;
 
+    /**
+     * @brief 获取节点的直接后继，结果按节点声明顺序排列
+     * @param[in] nodeId 节点标识
+     * @param[out] successors 直接后继节点标识
+     * @return 节点存在返回 true
+     */
+    bool GetSuccessors(const QString &nodeId, QVector<QString> &successors) const;
+
+    /**
+     * @brief 获取节点的直接前驱，结果按节点声明顺序排列
+     * @param[in] nodeId 节点标识
+     * @param[out] predecessors 直接前驱节点标识
+     * @return 节点存在返回 true
+     */
+    bool GetPredecessors(const QString &nodeId, QVector<QString> &predecessors) const;
+
+    /**
+     * @brief 获取所有源节点，结果按节点声明顺序排列
+     * @return 入度为零的节点标识
+     */
+    QVector<QString> GetSourceNodes() const;
+
+    /**
+     * @brief 获取指定节点的入度
+     * @param[in] nodeId 节点标识
+     * @param[out] inDegree 节点入度
+     * @return 节点存在返回 true
+     */
+    bool GetInDegree(const QString &nodeId, int &inDegree) const;
+
+    /**
+     * @brief 获取运行时可修改的入度副本
+     * @return 节点标识到初始入度的映射
+     */
+    QHash<QString, int> GetInDegreeMap() const;
+
 private:
     /**
      * @brief 清空图结构
@@ -134,6 +170,7 @@ private:
 
 private:
     QVector<QVector<_tagAgentDagEdge>> m_adjacentList; ///< 邻接表
+    QVector<QVector<int>> m_predecessorList;           ///< 反向邻接表
     QVector<int> m_inDegree;                           ///< 节点入度
     QVector<_tagAgentDagNode> m_nodes;                 ///< 节点定义表
     QHash<QString, int> m_nodeIndexMap;                ///< 节点标识到索引的映射

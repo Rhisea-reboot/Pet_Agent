@@ -12,6 +12,8 @@ set(CMAKE_AUTOUIC OFF)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network Multimedia)
 
+include(CTest)
+
 set(VPET_SOURCES
     src/main.cpp
     src/main_window.cpp
@@ -92,4 +94,29 @@ target_link_libraries(${PROJECT_NAME}
 
 if(WIN32)
     set_property(TARGET ${PROJECT_NAME} PROPERTY WIN32_EXECUTABLE TRUE)
+endif()
+
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(agent_dag_graph_tests
+        tests/agent_dag_graph_test.cpp
+        src/agent/agent_dag_graph.cpp
+        include/vpet/agent/agent_dag_graph.h
+    )
+
+    target_include_directories(agent_dag_graph_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(agent_dag_graph_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Test
+    )
+
+    set_property(TARGET agent_dag_graph_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME agent_dag_graph_tests COMMAND agent_dag_graph_tests)
 endif()

@@ -7,11 +7,14 @@
 #include <QJsonParseError>
 #include <QQueue>
 
+#include <algorithm>
+
 namespace vpet
 {
 
 AgentDagGraph::AgentDagGraph()
     : m_adjacentList()
+    , m_predecessorList()
     , m_inDegree()
     , m_nodes()
     , m_nodeIndexMap()
@@ -244,9 +247,138 @@ bool AgentDagGraph::GetNode(const QString &nodeId, _tagAgentDagNode &node) const
     return true;
 }
 
+bool AgentDagGraph::GetSuccessors(const QString &nodeId,
+                                  QVector<QString> &successors) const
+{
+    successors.clear();
+    const QString normalizedNodeId = nodeId.trimmed();
+
+    if (normalizedNodeId.isEmpty() || !m_nodeIndexMap.contains(normalizedNodeId))
+    {
+        return false;
+    }
+
+    const int nodeIndex = m_nodeIndexMap.value(normalizedNodeId);
+
+    if ((nodeIndex < 0) || (nodeIndex >= m_adjacentList.size()))
+    {
+        return false;
+    }
+
+    QVector<int> successorIndices;
+    successorIndices.reserve(m_adjacentList.at(nodeIndex).size());
+
+    for (const _tagAgentDagEdge &edge : m_adjacentList.at(nodeIndex))
+    {
+        successorIndices.append(edge.targetIndex);
+    }
+
+    std::sort(successorIndices.begin(), successorIndices.end());
+    successors.reserve(successorIndices.size());
+
+    for (const int successorIndex : successorIndices)
+    {
+        if ((successorIndex < 0) || (successorIndex >= m_nodes.size()))
+        {
+            successors.clear();
+            return false;
+        }
+
+        successors.append(m_nodes.at(successorIndex).id);
+    }
+
+    return true;
+}
+
+bool AgentDagGraph::GetPredecessors(const QString &nodeId,
+                                    QVector<QString> &predecessors) const
+{
+    predecessors.clear();
+    const QString normalizedNodeId = nodeId.trimmed();
+
+    if (normalizedNodeId.isEmpty() || !m_nodeIndexMap.contains(normalizedNodeId))
+    {
+        return false;
+    }
+
+    const int nodeIndex = m_nodeIndexMap.value(normalizedNodeId);
+
+    if ((nodeIndex < 0) || (nodeIndex >= m_predecessorList.size()))
+    {
+        return false;
+    }
+
+    QVector<int> predecessorIndices = m_predecessorList.at(nodeIndex);
+    std::sort(predecessorIndices.begin(), predecessorIndices.end());
+    predecessors.reserve(predecessorIndices.size());
+
+    for (const int predecessorIndex : predecessorIndices)
+    {
+        if ((predecessorIndex < 0) || (predecessorIndex >= m_nodes.size()))
+        {
+            predecessors.clear();
+            return false;
+        }
+
+        predecessors.append(m_nodes.at(predecessorIndex).id);
+    }
+
+    return true;
+}
+
+QVector<QString> AgentDagGraph::GetSourceNodes() const
+{
+    QVector<QString> sourceNodes;
+
+    for (int nodeIndex = 0; nodeIndex < m_nodes.size(); nodeIndex += 1)
+    {
+        if (m_inDegree.at(nodeIndex) == 0)
+        {
+            sourceNodes.append(m_nodes.at(nodeIndex).id);
+        }
+    }
+
+    return sourceNodes;
+}
+
+bool AgentDagGraph::GetInDegree(const QString &nodeId, int &inDegree) const
+{
+    inDegree = 0;
+    const QString normalizedNodeId = nodeId.trimmed();
+
+    if (normalizedNodeId.isEmpty() || !m_nodeIndexMap.contains(normalizedNodeId))
+    {
+        return false;
+    }
+
+    const int nodeIndex = m_nodeIndexMap.value(normalizedNodeId);
+
+    if ((nodeIndex < 0) || (nodeIndex >= m_inDegree.size()))
+    {
+        return false;
+    }
+
+    inDegree = m_inDegree.at(nodeIndex);
+    return true;
+}
+
+QHash<QString, int> AgentDagGraph::GetInDegreeMap() const
+{
+    QHash<QString, int> inDegreeMap;
+    inDegreeMap.reserve(m_nodes.size());
+
+    for (int nodeIndex = 0; nodeIndex < m_nodes.size(); nodeIndex += 1)
+    {
+        inDegreeMap.insert(m_nodes.at(nodeIndex).id, m_inDegree.at(nodeIndex));
+    }
+
+    return inDegreeMap;
+}
+
 void AgentDagGraph::Clear()
 {
     m_adjacentList.clear();
+    m_predecessorList.clear();
     m_inDegree.clear();
     m_nodes.clear();
     m_nodeIndexMap.clear();
@@ -262,6 +394,8 @@ void AgentDagGraph::Reset(int nodeCount)
 
     m_adjacentList.clear();
     m_adjacentList.resize(nodeCount);
+    m_predecessorList.clear();
+    m_predecessorList.resize(nodeCount);
     m_inDegree.clear();
     m_inDegree.resize(nodeCount);
     m_nodes.clear();
@@ -401,6 +535,7 @@ bool AgentDagGraph::AddEdge(const QString &fromNode,
     _tagAgentDagEdge edge;
     edge.targetIndex = toIndex;
     m_adjacentList[fromIndex].append(edge);
+    m_predecessorList[toIndex].append(fromIndex);
     m_inDegree[toIndex] += 1;
 
     return true;
