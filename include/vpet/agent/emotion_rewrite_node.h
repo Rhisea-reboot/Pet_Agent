@@ -24,12 +24,14 @@ public:
      * @param[in] node 节点定义
      * @param[in,out] context 运行时上下文
      * @param[in] llmClient 文本 LLM 客户端
+     * @param[out] pendingRequestId 异步请求 ID；未发起异步请求时为 -1
      * @param[out] errorMessage 错误描述
      * @return 请求发送成功或已直接完成时返回 true
      */
     static bool Execute(const _tagAgentDagNode &node,
                         AgentContext &context,
                         LlmClient *llmClient,
+                        int &pendingRequestId,
                         QString &errorMessage);
 
     /**

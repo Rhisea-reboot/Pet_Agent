@@ -2,6 +2,7 @@
 #define VPET_AGENT_AGENT_CONTEXT_H
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVariant>
@@ -62,6 +63,30 @@ public:
      * @return 上下文键名列表
      */
     QStringList GetKeys() const;
+
+    /**
+     * @brief 创建当前上下文的独立快照
+     * @return 可独立读写的上下文副本
+     */
+    AgentContext Snapshot() const;
+
+    /**
+     * @brief 将另一个上下文中的键值覆盖写入当前上下文
+     * @param[in] overlay 用于覆盖的上下文
+     * @return 覆盖成功返回 true
+     */
+    bool Overlay(const AgentContext &overlay);
+
+    /**
+     * @brief 提取相对基础上下文的覆盖增量和删除键
+     * @param[in] base 用于比较的基础上下文
+     * @param[out] delta 当前上下文相对基础上下文的新增或变更键
+     * @param[out] removedKeys 当前上下文相对基础上下文删除的键
+     * @return 提取成功返回 true
+     */
+    bool BuildDelta(const AgentContext &base,
+                    AgentContext &delta,
+                    QSet<QString> &removedKeys) const;
 
     /**
      * @brief 设置用户输入文本

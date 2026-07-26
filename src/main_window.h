@@ -17,7 +17,6 @@ class AgentRuntime;
 class ChatBubbleWindow;
 class PerceptionPipeline;
 class VoiceInputManager;
-class VisionLlmClient;
 
 /**
  * @brief 桌宠主窗口
@@ -160,21 +159,6 @@ private slots:
     void OnPerceptionError(const QString &message);
 
     /**
-     * @brief 多模态截图识别完成槽
-     * @param[in] requestId 请求 ID
-     * @param[in] content 识别结果
-     */
-    void OnVisionAnalysisCompleted(int requestId, const QString &content);
-
-    /**
-     * @brief 多模态截图识别失败槽
-     * @param[in] requestId 请求 ID
-     * @param[in] message 错误描述
-     * @param[in] statusCode HTTP 状态码
-     */
-    void OnVisionAnalysisFailed(int requestId, const QString &message, int statusCode);
-
-    /**
      * @brief 语音识别完成槽
      * @param[in] text 识别文本
      */
@@ -198,6 +182,14 @@ private slots:
      * @param[in] content 回复文本
      */
     void OnAgentLlmResponseReceived(int requestId, const QString &content);
+
+    /**
+     * @brief Agent 最终输出就绪槽
+     * @param[in] requestId 请求 ID
+     * @param[in] content 最终输出文本
+     * @param[in] source 输出来源，允许值为 user_response 或 vision_proactive
+     */
+    void OnAgentOutputReady(int requestId, const QString &content, const QString &source);
 
     /**
      * @brief Agent LLM 请求失败槽
@@ -253,11 +245,9 @@ private:
     QLabel *m_bubbleLabel;                ///< 气泡标签
     ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
     PerceptionPipeline *m_perceptionPipeline; ///< 视觉感知管道
-    VisionLlmClient *m_visionLlmClient;    ///< 多模态截图识别客户端
     VoiceInputManager *m_voiceInputManager; ///< 按键语音输入管理器
     AgentRuntime *m_agentRuntime;          ///< Agent 运行时对象，不持有所有权
     QSize m_currentImageSize;             ///< 当前图片尺寸
-    bool m_visionRequestInFlight;          ///< 多模态请求是否正在等待返回
     bool m_isVoiceHotkeyRegistered;        ///< 系统全局语音热键是否已注册
 };
 

@@ -22,11 +22,8 @@ const QString &CONTEXT_KEY_EMOTION_RAW_RESPONSE = AgentContextKeys::EMOTION_RAW_
 const QString &CONTEXT_KEY_EMOTION_SOURCE_TEXT = AgentContextKeys::EMOTION_SOURCE_TEXT;
 const QString &CONTEXT_KEY_EMOTION_USER = AgentContextKeys::EMOTION_USER;
 const QString &CONTEXT_KEY_LLM_LAST_RESPONSE = AgentContextKeys::LLM_LAST_RESPONSE;
-const QString &CONTEXT_KEY_RUNTIME_PENDING = AgentContextKeys::RUNTIME_PENDING;
-const QString &CONTEXT_KEY_RUNTIME_PENDING_NODE_ID = AgentContextKeys::RUNTIME_PENDING_NODE_ID;
-const QString &CONTEXT_KEY_RUNTIME_PENDING_NODE_TYPE = AgentContextKeys::RUNTIME_PENDING_NODE_TYPE;
-const QString &CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID = AgentContextKeys::RUNTIME_PENDING_REQUEST_ID;
-const QString &CONTEXT_KEY_RUNTIME_PENDING_RESUME_INDEX = AgentContextKeys::RUNTIME_PENDING_RESUME_INDEX;
+const QString &CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE = AgentContextKeys::NODE_INPUT_TEXT_RESPONSE;
+const QString &CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE = AgentContextKeys::SEMANTIC_TEXT_RESPONSE;
 constexpr int MAX_HISTORY_LINES = 60;
 
 } // anonymous namespace
@@ -34,8 +31,11 @@ constexpr int MAX_HISTORY_LINES = 60;
 bool EmotionRewriteNode::Execute(const _tagAgentDagNode &node,
                                  AgentContext &context,
                                  LlmClient *llmClient,
+                                 int &pendingRequestId,
                                  QString &errorMessage)
 {
+    pendingRequestId = -1;
+
     if (node.id.trimmed().isEmpty())
     {
         errorMessage = QStringLiteral("Emotion rewrite node id is empty.");
@@ -50,7 +50,9 @@ bool EmotionRewriteNode::Execute(const _tagAgentDagNode &node,
 
     QVariant responseValue;
 
-    if (!context.GetValue(CONTEXT_KEY_LLM_LAST_RESPONSE, responseValue))
+    if (!context.GetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, responseValue)
+        && !context.GetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, responseValue)
+        && !context.GetValue(CONTEXT_KEY_LLM_LAST_RESPONSE, responseValue))
     {
         return true;
     }
@@ -120,29 +122,7 @@ bool EmotionRewriteNode::Execute(const _tagAgentDagNode &node,
         return false;
     }
 
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING, true))
-    {
-        errorMessage = QStringLiteral("Emotion rewrite node failed to record pending state.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_ID, node.id.trimmed()))
-    {
-        errorMessage = QStringLiteral("Emotion rewrite node failed to record pending node id.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_TYPE, node.type.trimmed()))
-    {
-        errorMessage = QStringLiteral("Emotion rewrite node failed to record pending node type.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID, requestId))
-    {
-        errorMessage = QStringLiteral("Emotion rewrite node failed to record pending request ID.");
-        return false;
-    }
+    pendingRequestId = requestId;
 
     return true;
 }
@@ -216,12 +196,6 @@ bool EmotionRewriteNode::Complete(int requestId,
         errorMessage = QStringLiteral("Emotion rewrite node failed to record output text.");
         return false;
     }
-
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_ID);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_TYPE);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_RESUME_INDEX);
 
     return true;
 }

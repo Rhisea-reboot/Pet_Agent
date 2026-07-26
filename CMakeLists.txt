@@ -42,6 +42,9 @@ set(VPET_SOURCES
     src/agent/agent_context.cpp
     src/agent/agent_dag_graph.cpp
     src/agent/emotion_rewrite_node.cpp
+    src/agent/proactive_topic_node.cpp
+    src/agent/invocation_queue_policy.cpp
+    src/agent/agent_output_policy.cpp
     src/agent/agent_runtime.cpp
 )
 
@@ -72,6 +75,9 @@ set(VPET_HEADERS
     include/vpet/agent/agent_context_keys.h
     include/vpet/agent/agent_dag_graph.h
     include/vpet/agent/emotion_rewrite_node.h
+    include/vpet/agent/proactive_topic_node.h
+    include/vpet/agent/invocation_queue_policy.h
+    include/vpet/agent/agent_output_policy.h
     include/vpet/agent/agent_runtime.h
     src/main_window.h
 )
@@ -119,4 +125,82 @@ if(BUILD_TESTING)
     set_property(TARGET agent_dag_graph_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
 
     add_test(NAME agent_dag_graph_tests COMMAND agent_dag_graph_tests)
+
+    add_executable(agent_runtime_scheduler_tests
+        tests/agent_runtime_scheduler_test.cpp
+        src/agent/agent_context.cpp
+        src/agent/agent_dag_graph.cpp
+        src/agent/emotion_rewrite_node.cpp
+        src/agent/proactive_topic_node.cpp
+        src/agent/invocation_queue_policy.cpp
+        src/agent/agent_output_policy.cpp
+        src/agent/agent_runtime.cpp
+        src/llm/llm_client.cpp
+        src/llm/vision_llm_client.cpp
+        include/vpet/agent/agent_context.h
+        include/vpet/agent/agent_context_keys.h
+        include/vpet/agent/agent_dag_graph.h
+        include/vpet/agent/emotion_rewrite_node.h
+        include/vpet/agent/proactive_topic_node.h
+        include/vpet/agent/invocation_queue_policy.h
+        include/vpet/agent/agent_output_policy.h
+        include/vpet/agent/agent_runtime.h
+        include/vpet/llm/llm_client.h
+        include/vpet/llm/vision_llm_client.h
+    )
+
+    target_include_directories(agent_runtime_scheduler_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(agent_runtime_scheduler_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    set_property(TARGET agent_runtime_scheduler_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME agent_runtime_scheduler_tests COMMAND agent_runtime_scheduler_tests)
+
+    add_executable(application_integration_tests
+        tests/application_integration_test.cpp
+        src/agent/agent_context.cpp
+        src/agent/agent_dag_graph.cpp
+        src/agent/emotion_rewrite_node.cpp
+        src/agent/proactive_topic_node.cpp
+        src/agent/invocation_queue_policy.cpp
+        src/agent/agent_output_policy.cpp
+        src/agent/agent_runtime.cpp
+        src/llm/llm_client.cpp
+        src/llm/vision_llm_client.cpp
+        include/vpet/agent/agent_context.h
+        include/vpet/agent/agent_context_keys.h
+        include/vpet/agent/agent_dag_graph.h
+        include/vpet/agent/emotion_rewrite_node.h
+        include/vpet/agent/proactive_topic_node.h
+        include/vpet/agent/invocation_queue_policy.h
+        include/vpet/agent/agent_output_policy.h
+        include/vpet/agent/agent_runtime.h
+        include/vpet/llm/llm_client.h
+        include/vpet/llm/vision_llm_client.h
+    )
+
+    target_include_directories(application_integration_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(application_integration_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    set_property(TARGET application_integration_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME application_integration_tests COMMAND application_integration_tests)
 endif()

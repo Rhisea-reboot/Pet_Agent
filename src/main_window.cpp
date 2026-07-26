@@ -10,11 +10,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QByteArray>
-#include <QCoreApplication>
 #include <QDebug>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
 #include <QGuiApplication>
 #include <QMenu>
 #include <QScreen>
@@ -33,34 +29,7 @@ constexpr int BUBBLE_OFFSET_Y = 10;     ///< 气泡与窗口顶部的偏移
 constexpr int TARGET_DISPLAY_WIDTH = 300; ///< 宠物显示宽度，按原图比例缩放
 constexpr int SCREENSHOT_INTERVAL_MS = 3000; ///< 自动截图间隔
 constexpr int SAY_BUBBLE_DURATION_MS = 5000; ///< Say 气泡固定显示时长
-const QString VISION_LLM_CONFIG_FILE_NAME = QStringLiteral("vision_llm_config.json");
 constexpr int VOICE_HOTKEY_ID = 0x56504554;
-
-/**
- * @brief 查找多模态 LLM 配置文件
- * @return 配置文件绝对路径；未找到时返回空字符串
- */
-QString FindVisionLlmConfigFile()
-{
-    const QString exeDir = QCoreApplication::applicationDirPath();
-    const QStringList candidatePaths =
-    {
-        exeDir + QStringLiteral("/") + VISION_LLM_CONFIG_FILE_NAME,
-        QDir::currentPath() + QStringLiteral("/") + VISION_LLM_CONFIG_FILE_NAME,
-        exeDir + QStringLiteral("/../") + VISION_LLM_CONFIG_FILE_NAME,
-        exeDir + QStringLiteral("/../../") + VISION_LLM_CONFIG_FILE_NAME
-    };
-
-    for (const QString &candidatePath : candidatePaths)
-    {
-        if (QFile::exists(candidatePath))
-        {
-            return QFileInfo(candidatePath).absoluteFilePath();
-        }
-    }
-
-    return QString();
-}
 
 } // anonymous namespace
 
@@ -71,11 +40,9 @@ MainWindow::MainWindow(QWidget *parent)
     , m_bubbleLabel(nullptr)
     , m_chatBubbleWindow(nullptr)
     , m_perceptionPipeline(nullptr)
-    , m_visionLlmClient(nullptr)
     , m_voiceInputManager(nullptr)
     , m_agentRuntime(nullptr)
     , m_currentImageSize()
-    , m_visionRequestInFlight(false)
     , m_isVoiceHotkeyRegistered(false)
 {
     setWindowFlags(Qt::FramelessWindowHint
@@ -100,7 +67,6 @@ MainWindow::~MainWindow()
 {
     UnregisterVoiceHotkey();
     delete m_voiceInputManager;
-    delete m_visionLlmClient;
     delete m_perceptionPipeline;
     delete m_controller;
 }
@@ -140,28 +106,6 @@ bool MainWindow::Initialize(const QString &animationBasePath)
     if (m_chatBubbleWindow != nullptr)
     {
         m_chatBubbleWindow->hide();
-    }
-
-    m_visionLlmClient = new VisionLlmClient(this);
-
-    connect(m_visionLlmClient, &VisionLlmClient::AnalysisCompleted,
-            this, &MainWindow::OnVisionAnalysisCompleted);
-    connect(m_visionLlmClient, &VisionLlmClient::AnalysisFailed,
-            this, &MainWindow::OnVisionAnalysisFailed);
-
-    const QString visionLlmConfigPath = FindVisionLlmConfigFile();
-
-    if (visionLlmConfigPath.isEmpty())
-    {
-        qWarning() << "[VisionLLM] vision_llm_config.json not found. Screenshot analysis disabled.";
-    }
-    else if (!m_visionLlmClient->LoadConfig(visionLlmConfigPath))
-    {
-        qWarning() << "[VisionLLM] Failed to load config:" << visionLlmConfigPath;
-    }
-    else
-    {
-        qDebug() << "[VisionLLM] Config loaded:" << visionLlmConfigPath;
     }
 
     m_voiceInputManager = new VoiceInputManager(this);
@@ -230,6 +174,8 @@ void MainWindow::SetAgentRuntime(AgentRuntime *agentRuntime)
             this, &MainWindow::OnAgentLogMessage);
     connect(m_agentRuntime, &AgentRuntime::LlmResponseReceived,
             this, &MainWindow::OnAgentLlmResponseReceived);
+    connect(m_agentRuntime, &AgentRuntime::AgentOutputReady,
+            this, &MainWindow::OnAgentOutputReady);
     connect(m_agentRuntime, &AgentRuntime::LlmRequestFailed,
             this, &MainWindow::OnAgentLlmRequestFailed);
 }
@@ -526,15 +472,11 @@ void MainWindow::OnPerceptionDataReady(const QByteArray &encodedData, int frameI
     {
         QString errorMessage;
 
-        if (m_agentRuntime->HasPendingAsyncRequest())
-        {
-            qDebug() << "[Agent] Perception frame skipped while previous DAG request is pending:" << frameId;
-        }
-        else if (!m_agentRuntime->UpdatePerceptionFrame(encodedData,
-                                                        frameId,
-                                                        frameSize,
-                                                        modality,
-                                                        errorMessage))
+        if (!m_agentRuntime->UpdatePerceptionFrame(encodedData,
+                                                   frameId,
+                                                   frameSize,
+                                                   modality,
+                                                   errorMessage))
         {
             qWarning() << "[Agent] Failed to update perception context:" << errorMessage;
         }
@@ -556,42 +498,6 @@ void MainWindow::OnPerceptionError(const QString &message)
     }
 
     qWarning() << "[Vision]" << message;
-}
-
-void MainWindow::OnVisionAnalysisCompleted(int requestId, const QString &content)
-{
-    m_visionRequestInFlight = false;
-
-    if (requestId <= 0)
-    {
-        qWarning() << "[VisionLLM] Invalid completed request ID:" << requestId;
-        return;
-    }
-
-    if (content.isEmpty())
-    {
-        qWarning() << "[VisionLLM] Empty analysis result for request:" << requestId;
-        return;
-    }
-
-    qDebug() << "[VisionLLM] Analysis result, request:" << requestId;
-    qDebug().noquote() << content;
-}
-
-void MainWindow::OnVisionAnalysisFailed(int requestId, const QString &message, int statusCode)
-{
-    m_visionRequestInFlight = false;
-
-    if (message.isEmpty())
-    {
-        qWarning() << "[VisionLLM] Empty error message, request:" << requestId
-                   << "status:" << statusCode;
-        return;
-    }
-
-    qWarning() << "[VisionLLM] Request failed:" << requestId
-               << "status:" << statusCode
-               << "message:" << message;
 }
 
 void MainWindow::OnVoiceTranscriptionCompleted(const QString &text)
@@ -644,10 +550,41 @@ void MainWindow::OnAgentLlmResponseReceived(int requestId, const QString &conten
 
     qDebug() << "[AgentLLM] Voice response, request:" << requestId;
     qDebug().noquote() << content;
+}
+
+void MainWindow::OnAgentOutputReady(int requestId, const QString &content, const QString &source)
+{
+    if (requestId <= 0)
+    {
+        qWarning() << "[AgentOutput] Invalid request ID:" << requestId;
+        return;
+    }
+
+    const QString normalizedContent = content.trimmed();
+
+    if (normalizedContent.isEmpty())
+    {
+        qWarning() << "[AgentOutput] Empty final output for request:" << requestId;
+        return;
+    }
+
+    const QString normalizedSource = source.trimmed();
+    const SaySource saySource =
+        (normalizedSource == QStringLiteral("vision_proactive"))
+        ? SaySource::VisionProactive
+        : SaySource::UserResponse;
+
+    qDebug() << "[AgentOutput] Final output ready, request:" << requestId
+             << "source:" << normalizedSource;
+    qDebug().noquote() << normalizedContent;
 
     if (m_controller != nullptr)
     {
-        m_controller->RequestSay(content, SaySource::UserResponse);
+        if (!m_controller->RequestSay(normalizedContent, saySource))
+        {
+            qWarning() << "[AgentOutput] RequestSay rejected, request:" << requestId
+                       << "source:" << normalizedSource;
+        }
     }
 }
 
@@ -667,7 +604,7 @@ void MainWindow::OnAgentLlmRequestFailed(int requestId, const QString &message, 
 
 void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
 {
-    if ((m_visionLlmClient == nullptr) || (m_voiceInputManager == nullptr))
+    if (m_voiceInputManager == nullptr)
     {
         return;
     }
@@ -680,50 +617,54 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
         connect(voiceInputAction, &QAction::triggered, this, &MainWindow::ToggleVoiceRecording);
     }
 
-    menu.addSeparator();
-
-    QMenu *visionModelMenu = menu.addMenu(QStringLiteral("图像识别模型设置"));
-
-    if (visionModelMenu == nullptr)
+    if ((m_agentRuntime != nullptr) && m_agentRuntime->IsVisionLlmConfigured())
     {
-        return;
-    }
+        menu.addSeparator();
 
-    QActionGroup modelActionGroup(&menu);
-    modelActionGroup.setExclusive(true);
+        QMenu *visionModelMenu = menu.addMenu(QStringLiteral("图像识别模型设置"));
 
-    QAction *mimoAction = visionModelMenu->addAction(QStringLiteral("mimo-v2.5"));
-    QAction *gptAction = visionModelMenu->addAction(QStringLiteral("gpt"));
-
-    if ((mimoAction == nullptr) || (gptAction == nullptr))
-    {
-        return;
-    }
-
-    mimoAction->setCheckable(true);
-    gptAction->setCheckable(true);
-    modelActionGroup.addAction(mimoAction);
-    modelActionGroup.addAction(gptAction);
-
-    const VISION_LLM_MODEL_PROFILE activeProfile = m_visionLlmClient->GetActiveProfile();
-    mimoAction->setChecked(activeProfile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5);
-    gptAction->setChecked(activeProfile == VISION_LLM_MODEL_PROFILE::GPT);
-
-    connect(mimoAction, &QAction::triggered, this, [this]()
-    {
-        if (!m_visionLlmClient->SetActiveProfile(VISION_LLM_MODEL_PROFILE::MIMO_V2_5))
+        if (visionModelMenu != nullptr)
         {
-            qWarning() << "[VisionLLM] Failed to switch to mimo-v2.5 profile.";
-        }
-    });
+            QActionGroup modelActionGroup(&menu);
+            modelActionGroup.setExclusive(true);
 
-    connect(gptAction, &QAction::triggered, this, [this]()
-    {
-        if (!m_visionLlmClient->SetActiveProfile(VISION_LLM_MODEL_PROFILE::GPT))
-        {
-            qWarning() << "[VisionLLM] Failed to switch to gpt profile.";
+            QAction *mimoAction = visionModelMenu->addAction(QStringLiteral("mimo-v2.5"));
+            QAction *gptAction = visionModelMenu->addAction(QStringLiteral("gpt"));
+
+            if ((mimoAction != nullptr) && (gptAction != nullptr))
+            {
+                mimoAction->setCheckable(true);
+                gptAction->setCheckable(true);
+                modelActionGroup.addAction(mimoAction);
+                modelActionGroup.addAction(gptAction);
+
+                const VISION_LLM_MODEL_PROFILE activeProfile =
+                    m_agentRuntime->GetActiveVisionLlmProfile();
+                mimoAction->setChecked(activeProfile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5);
+                gptAction->setChecked(activeProfile == VISION_LLM_MODEL_PROFILE::GPT);
+
+                connect(mimoAction, &QAction::triggered, this, [this]()
+                {
+                    if ((m_agentRuntime == nullptr)
+                        || !m_agentRuntime->SetActiveVisionLlmProfile(
+                               VISION_LLM_MODEL_PROFILE::MIMO_V2_5))
+                    {
+                        qWarning() << "[VisionLLM] Failed to switch to mimo-v2.5 profile.";
+                    }
+                });
+
+                connect(gptAction, &QAction::triggered, this, [this]()
+                {
+                    if ((m_agentRuntime == nullptr)
+                        || !m_agentRuntime->SetActiveVisionLlmProfile(
+                               VISION_LLM_MODEL_PROFILE::GPT))
+                    {
+                        qWarning() << "[VisionLLM] Failed to switch to gpt profile.";
+                    }
+                });
+            }
         }
-    });
+    }
 
     menu.exec(globalPosition);
 }

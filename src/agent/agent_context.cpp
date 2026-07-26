@@ -83,6 +83,69 @@ QStringList AgentContext::GetKeys() const
     return keys;
 }
 
+AgentContext AgentContext::Snapshot() const
+{
+    return *this;
+}
+
+bool AgentContext::Overlay(const AgentContext &overlay)
+{
+    const QStringList keys = overlay.GetKeys();
+
+    for (const QString &key : keys)
+    {
+        QVariant value;
+
+        if (!overlay.GetValue(key, value) || !SetValue(key, value))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool AgentContext::BuildDelta(const AgentContext &base,
+                              AgentContext &delta,
+                              QSet<QString> &removedKeys) const
+{
+    delta.Clear();
+    removedKeys.clear();
+
+    const QStringList currentKeys = GetKeys();
+
+    for (const QString &key : currentKeys)
+    {
+        QVariant currentValue;
+        QVariant baseValue;
+
+        if (!GetValue(key, currentValue))
+        {
+            return false;
+        }
+
+        if (!base.GetValue(key, baseValue) || (currentValue != baseValue))
+        {
+            if (!delta.SetValue(key, currentValue))
+            {
+                return false;
+            }
+        }
+    }
+
+    const QStringList baseKeys = base.GetKeys();
+
+    for (const QString &key : baseKeys)
+    {
+        if (!Contains(key))
+        {
+            removedKeys.insert(key);
+        }
+    }
+
+    return true;
+}
+
 bool AgentContext::SetUserInput(const QString &userInput)
 {
     const QString normalizedUserInput = userInput.trimmed();

@@ -635,3 +635,372 @@
 - 当前完整 CMake/Ninja 构建仍失败，但没有输出具体编译诊断。
 - 失败覆盖 `mocs_compilation.cpp`、`main.cpp`、`main_window.cpp` 等旧文件，并非只发生在本次新增或修改的 Agent 文件上。
 - 本轮仍以针对性语法检查作为 Agent 改动的有效验证。
+
+## 2026-07-23 Agent Context 协议复查与补齐
+
+### 1. 检查目标
+
+本次检查对照 `AGENT_CONTEXT_KEY_PROTOCOL.md`，核对当前项目中的 Agent 上下文 key 和运行时执行流程是否严格遵守协议。
+
+重点检查范围：
+
+- `include/vpet/agent/agent_context_keys.h`
+- `src/agent/agent_context.cpp`
+- `src/agent/agent_runtime.cpp`
+- `src/agent/emotion_rewrite_node.cpp`
+- `agent_dag_structure.json`
+
+### 2. 检查结论
+
+整体结论：当前项目基本遵守协议，但异步回调路径此前不够严格。
+
+已确认事项：
+
+- Agent 上下文 key 已集中定义在 `AgentContextKeys` 命名空间。
+- `src/agent/*.cpp` 未发现跨节点 key 以 `QStringLiteral("semantic.*")`、`QStringLiteral("node.*")`、`QStringLiteral("llm.last_response")` 等形式散落硬编码。
+- 当前 DAG 节点类型使用 `vision.input`、`vision.llm`、`llm.chat`、`emotion.rewrite`、`output.format`，与内置节点类型常量一致。
+
+发现的问题：
+
+- `llm.chat` 与 `emotion.rewrite` 发起异步请求时，节点执行阶段尚无输出，运行时的 `SyncNodeOutputAliases` 无法同步最终结果。
+- LLM 回调完成后此前主要写入 `llm.last_response`，情感改写回调完成后主要写入 `emotion.output_text`，未立即补齐 `semantic.text.response` 与 `node.output.text_response`。
+- 这会让异步节点后接自定义语义节点时，不够严格依赖 `semantic.*` / `node.*` 协议层。
+
+### 3. 运行时修复
+
+修改文件：
+
+- `src/agent/agent_runtime.cpp`
+
+修复内容：
+
+- `OnLlmChatCompleted()` 在普通 LLM 回调完成后同步：
+- `llm.last_response -> semantic.text.response`
+- `llm.last_response -> node.output.text_response`
+- `OnLlmChatCompleted()` 在情感改写回调完成后同步：
+- `emotion.output_text -> semantic.text.response`
+- `emotion.output_text -> node.output.text_response`
+- 无 DAG 续跑、直接输出 fallback 时同步：
+- `output.text -> semantic.text.final`
+- `output.text -> node.output.text_final`
+
+修复后，异步节点不再只依赖私有 key 承载跨节点结果。
+
+### 4. 协议文档更新
+
+修改文件：
+
+- `AGENT_CONTEXT_KEY_PROTOCOL.md`
+
+更新内容：
+
+- 命名分层从四层扩展为五层，补充 `user.*` / `input.*` 输入状态层。
+- 补齐当前已存在的私有 key：`emotion.last_request_id`、`emotion.prompt_text`、`emotion.raw_response`、`emotion.source_text`、`vision.*`、`vision.llm.*`、`output.pending`。
+- 补充 `runtime.pass_through.<node_id>` 运行时追踪 key。
+- 明确新增节点必须优先产出 `semantic.*` 或 `node.output.*`。
+- 明确视觉、多模态、记忆等新增语义数据应优先扩展 `semantic.*`。
+- 补齐当前桥接关系，包含异步回调后必须补写的 `node.output.*` 和 `semantic.*`。
+
+### 5. 验证情况
+
+已执行静态搜索：
+
+- 搜索 `semantic.*`、`node.input.*`、`node.output.*`、`llm.*`、`emotion.*`、`output.text`、`runtime.*` 等上下文 key 使用。
+- 搜索 `.cpp` / `.h` / `.json` 中疑似硬编码 key 字符串。
+- 复查 `agent_dag_structure.json` 中节点类型与常量表一致。
+
+构建验证：
+
+- 尝试执行 `cmake --build build\Desktop_Qt_6_9_2_MinGW_64_bit-Debug`，当前 shell 找不到 `cmake`。
+- 尝试执行 `ninja -C build\Desktop_Qt_6_9_2_MinGW_64_bit-Debug`，当前 shell 找不到 `ninja`。
+- 因此本轮未完成编译验证，结果以静态检查和最小代码审查为准。
+
+## 2026-07-24 主动发话链路接通与可靠性修复
+
+### 1. 背景
+
+当前截图、视觉识别、气泡、TTS 两端能力已基本具备，但中间的主动发话决策与话题生成链路不完整，且存在本轮输入残留、输出来源错误、异步失败后 pending 不清理等问题。
+
+本轮按推荐实施顺序推进前四项，并修复两个最高优先级可靠性问题。
+
+### 2. 主动话题节点
+
+新增文件：
+
+- `include/vpet/agent/proactive_topic_node.h`
+- `src/agent/proactive_topic_node.cpp`
+
+修改文件：
+
+- `agent_dag_structure.json`
+- `agent_dag_structure.example.json`
+- `include/vpet/agent/agent_context_keys.h`
+- `include/vpet/agent/agent_runtime.h`
+- `src/agent/agent_runtime.cpp`
+- `AGENT_CONTEXT_KEY_PROTOCOL.md`
+
+实现内容：
+
+- 新增同步编排节点 `proactive.topic`。
+- DAG 调整为：
+
+```text
+vision.input
+→ vision.llm
+→ proactive.topic
+→ llm.chat
+→ emotion.rewrite
+→ output.format
+```
+
+- 节点读取 `semantic.vision.summary`，输出：
+  - `semantic.proactive.should_speak`
+  - `semantic.proactive.topic`
+  - `semantic.proactive.reason`
+  - `semantic.text.prompt`
+  - `node.output.prompt`
+- 已存在用户提示词时不覆盖，写入 `should_speak=false` 和 `reason=user_prompt_available`。
+- 节点禁用、视觉摘要缺失或为空时静默结束。
+- `output.format` 在 `should_speak=false` 且无文本输出时正常静默完成，不设置 `output.pending`。
+
+当前限制：
+
+- 第一版有视觉摘要即倾向于说话，尚未实现冷却、画面变化检测和话题去重。
+
+### 3. 本轮输入残留与触发来源
+
+修改文件：
+
+- `include/vpet/agent/agent_context_keys.h`
+- `src/agent/agent_runtime.cpp`
+- `AGENT_CONTEXT_KEY_PROTOCOL.md`
+
+实现内容：
+
+- 新增 `runtime.trigger.type`，允许值为 `user` 或 `vision`。
+- 用户入口写入 `user`，视觉帧入口写入 `vision`。
+- `PrepareTextInputContext()` 根据触发类型判断本轮是否有用户输入，不再仅凭上下文中残留的 `user.input` 推断。
+- 新增 `ClearInvocationInputState()`，在一轮完成或失败后清理：
+  - `user.input`
+  - `input.available`
+  - `node.input.prompt`
+  - `prompt.text`
+  - `semantic.text.prompt`
+  - `runtime.trigger.type`
+- 视觉触发时主动清除本轮 `user.input`，避免旧用户输入污染主动发话链路。
+
+### 4. 无用户输入的主动历史
+
+修改文件：
+
+- `src/agent/agent_runtime.cpp`
+
+实现内容：
+
+- `AppendConversationHistory()` 改为输出文本必填、用户输入可选。
+- 用户回复：记录 `user: ...` + `assistant: ...`。
+- 主动发话：只记录 `assistant: ...`，不伪造用户输入。
+
+### 5. 最终输出来源 vision_proactive
+
+修改文件：
+
+- `include/vpet/agent/agent_context_keys.h`
+- `include/vpet/agent/agent_runtime.h`
+- `src/agent/agent_runtime.cpp`
+- `src/main_window.h`
+- `src/main_window.cpp`
+- `AGENT_CONTEXT_KEY_PROTOCOL.md`
+
+实现内容：
+
+- 新增语义 key：`semantic.output.source`。
+- 允许值：`user_response`、`vision_proactive`。
+- `output.format` 根据 `runtime.trigger.type` 写入输出来源。
+- 信号扩展为：
+
+```cpp
+AgentOutputReady(int requestId,
+                 const QString &content,
+                 const QString &source);
+```
+
+- `MainWindow::OnAgentOutputReady()` 映射：
+  - `vision_proactive` → `SaySource::VisionProactive`
+  - 其他 → `SaySource::UserResponse`
+- 调用 `RequestSay()` 时检查返回值，拒绝时输出 warning，避免静默丢话。
+
+### 6. 异步失败 pending 清理
+
+修改文件：
+
+- `include/vpet/agent/agent_runtime.h`
+- `src/agent/agent_runtime.cpp`
+
+实现内容：
+
+- 新增 `ResetAsyncExecutionState()`，统一清理：
+  - `llm.pending` / `vision.llm.pending`
+  - `runtime.async.*`
+  - 本轮输入与触发来源
+  - 成员变量 `m_pendingResumeIndex` / `m_pendingNodeType` / `m_pendingRequestId`
+- 覆盖路径：
+  - LLM 空回复、无效 requestId、写上下文失败、续跑失败
+  - Emotion 完成失败
+  - Vision 空回复、写摘要失败、请求失败
+  - `ExecuteFromIndex()` 节点执行失败
+- requestId 与 pending 不匹配时只忽略响应，不清当前合法 pending，避免误伤在途请求。
+
+### 7. 统一视觉 LLM 客户端
+
+修改文件：
+
+- `include/vpet/agent/agent_runtime.h`
+- `src/agent/agent_runtime.cpp`
+- `src/main_window.h`
+- `src/main_window.cpp`
+
+实现内容：
+
+- 删除 MainWindow 侧闲置 `VisionLlmClient`、相关槽和 `m_visionRequestInFlight`。
+- 视觉请求只由 `AgentRuntime` 内部客户端执行。
+- 右键菜单模型切换改为调用：
+  - `AgentRuntime::SetActiveVisionLlmProfile()`
+  - `AgentRuntime::GetActiveVisionLlmProfile()`
+- 视觉配置仍由 `main.cpp` 调用 `LoadDefaultVisionLlmConfig()` 加载。
+
+### 8. 协议与进度
+
+协议更新：
+
+- 补充 `semantic.proactive.*`、`semantic.output.source`、`runtime.trigger.type`。
+- 补充 `proactive.topic` 节点规则。
+- 补充桥接：
+
+```text
+runtime.trigger.type -> semantic.output.source
+semantic.output.source -> AgentOutputReady.source
+semantic.vision.summary -> proactive.topic
+proactive.topic -> semantic.text.prompt
+```
+
+推荐实施顺序进度：
+
+1. 修复本轮 `user.input` 残留与触发来源判断：已完成
+2. 新增 `proactive.topic` 节点和相关 key：基本完成
+3. `output.format` 支持无用户输入主动输出：已完成
+4. 最终输出附带 `vision_proactive` 来源：已完成
+5. 异步失败 pending 清理：已完成
+6. 冷却与智能 `should_speak`：未做
+7. 画面变化检测：未做
+8. 统一重复视觉客户端：已完成
+9. 情绪标签接入桌宠动画：未做
+
+### 9. 后续建议
+
+- 在 `proactive.topic` 或前置策略中增加最短发话间隔、摘要去重、话题去重。
+- 在截图入口增加本地画面变化检测，减少无效视觉请求。
+- 补齐 `proactive.topic` 的 `SyncNodeOutputAliases` 桥接，避免只依赖节点内部双写。
+- 评估 `AgentContext &GetContext()` 的封装暴露风险。
+- 完成完整 CMake 编译验证。
+
+### 10. P1 在线节点就绪队列
+
+修改文件：
+
+- `include/vpet/agent/agent_runtime.h`
+- `src/agent/agent_runtime.cpp`
+- `tests/agent_runtime_scheduler_test.cpp`
+- `CMakeLists.txt`
+
+实现内容：
+
+- 新增私有 `_tagInvocationState`，保存本轮 `remainingInDegree`、稳定 FIFO `readyQueue` 和异步等待节点标识。
+- `Execute()` 不再按加载期 `m_executionOrder` 逐项扫描；改为以 `AgentDagGraph::GetSourceNodes()` 初始化队列，并通过 `PumpReadyQueue()` 在线执行。
+- 同步节点完成后调用 `CompleteNode()`：只对其直接后继递减运行时入度，入度变为零时才进入 ready queue。
+- 异步节点保持 P1 的单 pending 限制：节点发起请求时暂停；回调完成后通过 `ResumePendingNode()` 标记该节点完成，再继续推进就绪节点。
+- `Load()`、`Execute()` 与 `ExecuteWithUserInput()` 在 active invocation 或 pending 请求存在时明确拒绝，避免共享 `m_context` 被下一轮触发覆盖。
+- 新增运行时调度测试：验证双源扇入节点在全部父节点完成后执行，并验证执行中拒绝重新执行或重载图。
+
+当前约束：
+
+- P1 仍使用单一共享 `AgentContext`，未实现 branch context、join merge 或 `pendingByRequestId`；这些能力属于后续 P2-P4。
+- P1 将并列节点按节点声明顺序串行执行，消除了“先构造全局拓扑序再按索引恢复”的调度模型，但尚未提供并行数据隔离。
+
+### 11. P2-P5 分支上下文、Join、异步恢复与跨轮调度
+
+实现内容：
+
+- P2：新增 session base、branch local、执行视图、增量和删除键，源分支与 fan-out 分支独立保存数据。
+- P3：fan-in 节点合并父结果；不同值默认失败，并支持 `prefer_user`、`prefer_vision`、`concat`。
+- P4：异步状态改为 `pendingByRequestId`，支持同一 invocation 多个异步分支乱序恢复，并处理失败、超时和晚到回调。
+- P5：活动 invocation 期间的新触发保存为 FIFO 输入增量；当前轮结束后基于最新 session base 启动队首。
+- 源节点声明 `config.trigger` 时按 user 或 vision 裁剪可达子图并重算子图入度；旧配置没有 trigger 声明时保持全图执行。
+- MainWindow 不再丢弃活动异步轮次期间到达的视觉帧，而是交由 Runtime 排队。
+
+验证：
+
+- `agent_dag_graph_tests` 通过。
+- `agent_runtime_scheduler_tests` 通过，覆盖 P1-P4 基线、FIFO 顺序和 trigger 子图裁剪。
+
+P5 完善：
+
+- 默认 DAG 升级为 `user.input` 与 `vision.input` 双 trigger source，共享后续文本生成和输出节点。
+- `Start()` 仅加载没有 trigger 输入的启动配置，不再创建空 invocation。
+- 活动 invocation 期间的视觉帧由 `UpdatePerceptionFrame()` 直接进入 FIFO，并兼容调用方随后调用 `Execute()`，不会重复排队。
+- 新增 user 执行期间 vision 入队、失败后启动队首、队首读取最新 session history、跨轮 `user.input` 隔离测试。
+
+### 12. P1-P4 阶段核验与 P4 多异步实现（2026-07-26）
+
+本轮核验确认：P1、P2、P3 已完成；并继续完成 P4。P5 尚未作为本轮实现目标开始，后续应以实际代码和测试为准推进，避免沿用未验证的进度描述。
+
+P1 在线调度：
+
+- 使用 `readyQueue` 在线推进，不再依赖加载期拓扑序作为运行时恢复计划。
+- 节点只有在真正完成后才会递减后继入度；后继入度归零后才进入就绪队列。
+- 同层节点按声明顺序稳定执行，节点失败不会继续调度其后继。
+
+P2 分支上下文：
+
+- 使用 `m_sessionContext` 作为跨轮基座，使用 branch local 保存本轮可写增量。
+- 执行视图支持快照、delta 和删除键记录。
+- source 分支与 fan-out 分支互相隔离，失败 invocation 的输出不会写入 session base。
+
+P3 Join 合并：
+
+- fan-in 节点等待所有父节点完成后创建 join branch。
+- 单一来源键直接复制；多个父节点提供相同值时保留。
+- 不同值、删除与写入冲突默认失败，错误包含 join 节点、冲突键和父节点。
+- 支持 `prefer_user`、`prefer_vision`、`concat`，未知策略明确拒绝。
+- `runtime.executed_nodes` 在 join 处按父节点声明顺序去重合并；其他运行时控制键不跨 join 传播。
+
+P4 多异步恢复：
+
+- 删除 `m_pendingRequestId`、`m_pendingNodeType`、`pendingNodeId` 和 resume index 单槽恢复模型。
+- 在 invocation 内使用 `pendingByRequestId` 保存 request ID、invocation ID、node ID、branch ID、节点类型和独立 continuation context。
+- 一个 invocation 可以同时挂起多个异步节点；无关 ready branch 不会被单个 pending 阻塞。
+- 回调按 request ID 定位对应分支，支持乱序恢复；未知、重复和晚到回调不会污染当前 invocation。
+- 已知异步请求失败或超时会终止所属 invocation，并清理全部 pending，不提交本轮 session 状态。
+- 支持节点配置 `config.async_timeout_ms`，默认 120000 毫秒，有效范围为 1 到 600000 毫秒。
+
+测试与构建验证：
+
+- `VPet` 完整构建成功。
+- `agent_dag_graph_tests` 通过。
+- `agent_runtime_scheduler_tests` 通过，覆盖 P1-P4 基线、Join 冲突策略、双异步乱序、异步失败、异步超时和晚到回调。
+- CTest：2/2 测试目标通过。
+- 测试构建目录 `build-tests/` 已清理。
+
+本轮状态校正与后续补齐：
+
+- P5 已在上一轮完成：跨轮 invocation FIFO、user/vision trigger 子图裁剪、输出与 conversation history 的 invocation 级隔离均已有代码和测试覆盖。
+- 本轮新增主动发话基础抑制：`min_interval_ms` 冷却、`dedup_window_ms` 摘要去重和持久化最近主动输出状态。
+- 本轮新增视觉帧内容 hash 去重；相同编码内容不会重复进入 Runtime。
+- 本轮将视觉等待队列调整为 latest-wins，用户输入仍保持 FIFO。
+- 本轮新增 `InvocationQueuePolicy` 和 `AgentOutputPolicy`，从 `AgentRuntime` 抽离跨轮队列与主动输出状态职责。
+- 本轮新增应用入口级 Runtime 集成测试，覆盖用户输入、视觉帧写入和重复帧过滤。
+
+尚未完成：
+
+- Runtime 主文件仍包含节点执行、异步恢复和 join 合并实现，后续应继续按模块拆分。
+- 主动策略尚未接入用户忙碌、TTS 播放状态、专注模式和语义相似度去重。
