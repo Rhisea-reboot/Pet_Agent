@@ -1,6 +1,14 @@
 #include "vpet/pet_controller.h"
+#include "vpet/say_dialog.h"
+#include "vpet/tts_client.h"
+#include "vpet/tts_audio_player.h"
 
+#include <QCoreApplication>
 #include <QCursor>
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QRandomGenerator>
 #include <QScreen>
@@ -36,6 +44,12 @@ PetController::PetController(const QString &animationBasePath, QObject *parent)
     , m_pendingHitType(HIT_TYPE::NONE)
     , m_lastState(PET_STATE::IDLE)
     , m_frameSize(100, 100)
+    , m_ttsClient(nullptr)
+    , m_ttsAudioPlayer(nullptr)
+    , m_tempDir()
+    , m_currentSayText()
+    , m_sayTextShown(false)
+    , m_synthesisCounter(0)
 {
 }
 
@@ -49,6 +63,56 @@ bool PetController::Initialize()
     m_stateMachine.Initialize();
     m_lastState = m_stateMachine.GetCurrentState();
 
+    // 初始化 TTS 客户端
+    m_ttsClient = new TtsClient(this);
+
+    // 多级路径查找配置文件（与 TtsServerManager::FindConfigFile 逻辑一致）
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    qDebug() << "[TTS] PetController init - exeDir:" << exeDir;
+    qDebug() << "[TTS] PetController init - cwd:" << QDir::currentPath();
+
+    const QStringList candidatePaths =
+    {
+        exeDir + QStringLiteral("/tts_config.json"),
+        QDir::currentPath() + QStringLiteral("/tts_config.json"),
+        exeDir + QStringLiteral("/../tts_config.json"),
+        exeDir + QStringLiteral("/../../tts_config.json"),
+    };
+
+    QString ttsConfigPath;
+
+    for (const QString &candidate : candidatePaths)
+    {
+        const bool exists = QFile::exists(candidate);
+        qDebug() << "[TTS]   checking:" << candidate << "->" << (exists ? "FOUND" : "not found");
+
+        if (exists)
+        {
+            ttsConfigPath = QFileInfo(candidate).absoluteFilePath();
+            qDebug() << "[TTS]   resolved:" << ttsConfigPath;
+            break;
+        }
+    }
+
+    if (!ttsConfigPath.isEmpty())
+    {
+        m_ttsClient->LoadConfig(ttsConfigPath);
+    }
+    else
+    {
+        qDebug() << "[TTS]   WARNING: tts_config.json not found in any search path!";
+    }
+
+    connect(m_ttsClient, &TtsClient::SynthesisFinished,
+            this, &PetController::OnTtsSynthesisFinished);
+
+    // 初始化 TTS 音频播放器
+    m_ttsAudioPlayer = new TtsAudioPlayer(this);
+
+    connect(m_ttsAudioPlayer, &TtsAudioPlayer::PlaybackFinished,
+            this, &PetController::OnAudioPlaybackFinished);
+
+    // 初始化更新定时器
     m_updateTimer = new QTimer(this);
     m_updateTimer->setInterval(UPDATE_INTERVAL_MS);
 
@@ -225,7 +289,76 @@ void PetController::OnUpdate()
 
         if (currentState == PET_STATE::SAYING)
         {
-            emit SayStarted(m_stateMachine.GetCurrentClipName());
+            // SAYING 状态由 OnTtsSynthesisFinished 中调用 EnterSayState 进入，
+            // 此时动画、气泡、音频同步开始
+            const QString clipName = m_stateMachine.GetCurrentClipName();
+            qDebug() << "[TTS] === Entering SAYING state ===";
+            qDebug() << "[TTS]   clipName:" << clipName;
+            emit SayStarted(clipName);
+
+            // 显示气泡
+            if (!m_currentSayText.isEmpty())
+            {
+                qDebug() << "[TTS]   bubble shown:" << m_currentSayText;
+                emit SayTextReady(m_currentSayText);
+            }
+
+            // 播放已合成的音频
+            if (!m_pendingAudioPath.isEmpty()
+                && (m_ttsAudioPlayer != nullptr))
+            {
+                qDebug() << "[TTS]   playing pre-synthesized audio:" << m_pendingAudioPath;
+                m_ttsAudioPlayer->Play(m_pendingAudioPath);
+            }
+        }
+        else
+        {
+            // 离开 SAYING 状态时清理
+            m_currentSayText.clear();
+            m_pendingAudioPath.clear();
+        }
+    }
+
+    // 处理 Say 动作：IdleTrigger 概率命中后，先合成音频再进入状态
+    if (m_stateMachine.ConsumeSayPending())
+    {
+        const QString sayAction = m_stateMachine.SelectRandomSayAction();
+
+        qDebug() << "[TTS] Say pending, action:" << sayAction;
+
+        if (sayAction.isEmpty())
+        {
+            qDebug() << "[TTS]   no say actions available, falling back to Idle";
+            m_stateMachine.IdleTrigger();
+        }
+        else
+        {
+            // 选取台词
+            m_currentSayText = SayDialog::GetRandomText(sayAction);
+            m_pendingAudioPath.clear();
+
+            qDebug() << "[TTS]   selected text:" << m_currentSayText;
+
+            if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured()
+                && !m_currentSayText.isEmpty())
+            {
+                // 停止当前播放
+                if ((m_ttsAudioPlayer != nullptr) && m_ttsAudioPlayer->IsPlaying())
+                {
+                    m_ttsAudioPlayer->Stop();
+                }
+
+                // 唯一文件名
+                const QString uniqueName = QStringLiteral("say_%1.wav")
+                                           .arg(m_synthesisCounter);
+
+                m_pendingAudioPath = m_tempDir.filePath(uniqueName);
+                m_pendingSayAction = sayAction;
+                m_synthesisCounter += 1;
+
+                qDebug() << "[TTS]   synthesizing audio first, output:" << m_pendingAudioPath;
+                m_ttsClient->Synthesize(m_currentSayText, m_pendingAudioPath);
+            }
         }
     }
 
@@ -358,6 +491,94 @@ void PetController::ClampPositionToScreen(QPoint &position) const
     {
         position.setY(m_screenBounds.bottom() - m_frameSize.height());
     }
+}
+
+void PetController::OnTtsSynthesisFinished(const QString &filePath)
+{
+    qDebug() << "[TTS] OnTtsSynthesisFinished, filePath:" << filePath;
+
+    // 检查参数有效性
+    if (filePath.isEmpty())
+    {
+        qDebug() << "[TTS]   FAILED - empty filePath (synthesis error or server error)";
+        m_pendingAudioPath.clear();
+        m_pendingSayAction.clear();
+        return;
+    }
+
+    // 检查音频文件是否存在
+    if (!QFileInfo::exists(filePath))
+    {
+        qDebug() << "[TTS]   FAILED - audio file not found";
+        m_pendingAudioPath.clear();
+        m_pendingSayAction.clear();
+        return;
+    }
+
+    // 如果有待处理的 Say 动作，先进入 SAYING 状态再播放
+    if (!m_pendingSayAction.isEmpty())
+    {
+        const QString actionName = m_pendingSayAction;
+        m_pendingSayAction.clear();
+
+        qDebug() << "[TTS]   entering SAYING state with action:" << actionName;
+
+        if (m_stateMachine.EnterSayState(actionName))
+        {
+            // EnterSayState 成功后，OnUpdate 下一帧检测到 SAYING，
+            // 会播放 m_pendingAudioPath 中的音频
+            return;
+        }
+
+        // 进入 SAYING 失败（用户在此期间点击/拖拽了宠物），
+        // 丢弃本次合成的音频，不做任何播放
+        qDebug() << "[TTS]   EnterSayState failed - pet was interrupted, discarding audio";
+
+        if (!m_pendingAudioPath.isEmpty())
+        {
+            QFile::remove(m_pendingAudioPath);
+            m_pendingAudioPath.clear();
+        }
+
+        return;
+    }
+
+    // 直接播放（宠物已在 SAYING 状态，例如由其他路径触发）
+    if (m_ttsAudioPlayer != nullptr)
+    {
+        qDebug() << "[TTS]   playing audio directly...";
+        m_ttsAudioPlayer->Play(filePath);
+    }
+}
+
+void PetController::OnAudioPlaybackFinished()
+{
+    qDebug() << "[TTS] OnAudioPlaybackFinished - audio playback done";
+
+    // 告诉状态机退出 SAYING 的 B 循环，进入 C→IDLE
+    if (m_stateMachine.GetCurrentState() == PET_STATE::SAYING)
+    {
+        qDebug() << "[TTS]   requesting exit from SAYING loop";
+        m_stateMachine.RequestExitLoop();
+    }
+
+    // 播放完毕后删除音频文件以节约磁盘空间
+    if (!m_pendingAudioPath.isEmpty())
+    {
+        QFile audioFile(m_pendingAudioPath);
+
+        if (audioFile.exists())
+        {
+            const bool removed = audioFile.remove();
+            qDebug() << "[TTS]   deleted audio file:" << m_pendingAudioPath
+                     << "success:" << removed;
+        }
+
+        m_pendingAudioPath.clear();
+    }
+
+    // 清理 SAYING 相关状态
+    m_currentSayText.clear();
 }
 
 } // namespace vpet

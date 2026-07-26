@@ -136,6 +136,32 @@ public:
      */
     QString GetCurrentClipName() const;
 
+    /**
+     * @brief 获取随机 Say 动作名
+     *
+     * 从可用 Say 分组中随机选择一个，不改变当前状态。
+     * 用于外部先完成 TTS 合成再进入 SAYING 状态。
+     *
+     * @return Say 动作名，如 "say_self"；无可用 Say 动作时返回空字符串
+     */
+    QString SelectRandomSayAction() const;
+
+    /**
+     * @brief 强制进入指定 Say 状态
+     *
+     * 用于在 TTS 音频合成完成后，以指定动作进入 SAYING 状态。
+     *
+     * @param[in] actionName Say 动作名，如 "say_self"
+     * @return 成功进入返回 true
+     */
+    bool EnterSayState(const QString &actionName);
+
+    /**
+     * @brief 判断上一次 IdleTrigger 是否选中了 Say 动作
+     * @return 选中返回 true；调用后自动清除标记
+     */
+    bool ConsumeSayPending();
+
 private:
     /**
      * @brief 进入指定状态并加载对应动画
@@ -171,6 +197,7 @@ private:
     int m_frameIndex;                                  ///< 当前帧索引
     int m_elapsedMs;                                   ///< 当前帧已播放时间
     bool m_shouldExitLoop;                             ///< B 段是否收到退出信号
+    bool m_sayPending;                                 ///< IdleTrigger 是否选中了 Say 动作
 };
 
 } // namespace vpet

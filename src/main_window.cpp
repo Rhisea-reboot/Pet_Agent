@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "vpet/chat_bubble_window.h"
 
 #include <QApplication>
 #include <QGuiApplication>
@@ -20,6 +21,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_controller(nullptr)
     , m_imageLabel(nullptr)
     , m_bubbleLabel(nullptr)
+    , m_chatBubbleWindow(nullptr)
     , m_currentImageSize()
 {
     setWindowFlags(Qt::FramelessWindowHint
@@ -71,6 +73,16 @@ bool MainWindow::Initialize(const QString &animationBasePath)
             this, &MainWindow::OnStateChanged);
     connect(m_controller, &PetController::SayStarted,
             this, &MainWindow::OnSayStarted);
+    connect(m_controller, &PetController::SayTextReady,
+            this, &MainWindow::OnSayTextReady);
+
+    // 创建聊天气泡窗口（独立顶层窗口，用于 IPC 式通信）
+    m_chatBubbleWindow = new ChatBubbleWindow(nullptr);
+
+    if (m_chatBubbleWindow != nullptr)
+    {
+        m_chatBubbleWindow->hide();
+    }
 
     CenterOnScreen();
 
@@ -171,11 +183,25 @@ void MainWindow::OnBubbleChanged(bool visible, const QString &text)
 void MainWindow::OnPositionChanged(const QPoint &position)
 {
     move(position);
+
+    // 气泡跟随宠物移动
+    if ((m_chatBubbleWindow != nullptr) && m_chatBubbleWindow->IsVisible())
+    {
+        m_chatBubbleWindow->FollowTarget(position, m_currentImageSize);
+    }
 }
 
 void MainWindow::OnStateChanged(PET_STATE newState)
 {
     (void)newState;
+
+    // 离开 SAYING 状态时隐藏聊天气泡
+    if ((newState != PET_STATE::SAYING)
+        && (m_chatBubbleWindow != nullptr)
+        && m_chatBubbleWindow->IsVisible())
+    {
+        m_chatBubbleWindow->Hide();
+    }
 }
 
 void MainWindow::UpdateHitRegions(const QSize &imageSize)
@@ -219,9 +245,26 @@ void MainWindow::CenterOnScreen()
 
 void MainWindow::OnSayStarted(const QString &groupName)
 {
-    // 预留接口：在此处接入 XAML 聊天气泡绘制逻辑
-    // 当前仅记录分组名，后续可根据 groupName 显示对应对话内容
     (void)groupName;
+    // TTS 合成与台词选择已在 PetController 中处理，
+    // 此处仅记录分组名，气泡显示通过 SayTextReady 信号触发。
+}
+
+void MainWindow::OnSayTextReady(const QString &text)
+{
+    if (text.isEmpty())
+    {
+        return;
+    }
+
+    if (m_chatBubbleWindow == nullptr)
+    {
+        return;
+    }
+
+    // 气泡持续显示直到音频播放完毕离开 SAYING 状态，不设自动隐藏
+    m_chatBubbleWindow->Show(text, 0);
+    m_chatBubbleWindow->FollowTarget(m_controller->GetPosition(), m_currentImageSize);
 }
 
 } // namespace vpet
