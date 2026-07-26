@@ -12,6 +12,9 @@ cmake-build-*/
 Debug/
 Release/
 
+# Local LLM credentials
+llm_config.json
+
 # GPT-SoVITS — 排除大型二进制文件，仅跟踪 Python 源码与配置
 GPT-SoVITS/runtime/
 GPT-SoVITS/GPT_weights/

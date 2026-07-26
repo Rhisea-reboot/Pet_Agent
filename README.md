@@ -162,6 +162,105 @@ copy vision_llm_config.example.json vision_llm_config.json
 
 默认 DAG 使用两个 trigger source：`user.input` 声明 `trigger=user`，`vision.input` 声明 `trigger=vision`。Runtime 会按触发来源裁剪可达子图；活动 invocation 期间用户输入进入 FIFO，视觉输入采用 latest-wins 替换等待队列中的旧帧。
 
+#### DAG 修改方式
+
+编辑根目录下的 `agent_dag_structure.json`，修改后重启程序生效。建议先复制并参考 `agent_dag_structure.example.json`。DAG 配置由 `nodes` 和 `edges` 两部分组成：
+
+```json
+{
+  "nodes": [
+    {
+      "id": "user_input",
+      "type": "user.input",
+      "config": { "trigger": "user" }
+    },
+    {
+      "id": "call_llm",
+      "type": "llm.chat",
+      "config": {}
+    },
+    {
+      "id": "format_output",
+      "type": "output.format",
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "user_input", "to": "call_llm" },
+    { "from": "call_llm", "to": "format_output" }
+  ]
+}
+```
+
+修改规则：
+
+- `id` 在整个配置中必须唯一，边中的 `from` 和 `to` 必须引用已定义的节点 ID。
+- `type` 必须是下方“可用模块”中的类型，否则 Runtime 会在执行时报告未注册处理器。
+- 边表示执行依赖，不表示数据字段映射；节点通过 `semantic.*` 上下文 key 交换数据。
+- 图必须是 DAG，不能包含环；Runtime 会在加载时执行拓扑校验。
+- 没有 `config.trigger` 的源节点会参与所有触发类型；声明 `trigger=user` 或 `trigger=vision` 后，只在对应入口触发。
+- 用户输入入口应连接到需要文本输入的下游节点；视觉输入入口应连接到 `vision.llm`。
+- 多个父节点汇入同一个节点时会触发 Join 合并；存在相同 key 的不同值时必须在节点配置中提供合并策略，否则本轮执行失败。
+- 修改配置后必须重启程序；当前不会动态热加载 DAG。
+
+常见组合：
+
+```text
+仅文本对话：user.input → llm.chat → output.format
+视觉主动发话：vision.input → vision.llm → proactive.topic → llm.chat → output.format
+带情感改写：user.input → llm.chat → emotion.rewrite → output.format
+完整默认链路：vision.input → vision.llm → proactive.topic → llm.chat → emotion.rewrite → output.format
+```
+
+#### 可用模块
+
+| 模块类型 | 作用 | 主要输入 | 主要输出与配置 |
+|---|---|---|---|
+| `user.input` | 用户输入触发源 | `user.input` | 设置 `trigger: "user"`；通常作为文本链路源节点 |
+| `vision.input` | 视觉输入触发源 | 最新截图、帧尺寸、帧 ID | 设置 `trigger: "vision"`；写入 `semantic.image.*` 和 `semantic.vision.*` |
+| `vision.llm` | 调用视觉 LLM 生成屏幕摘要 | `semantic.image.base64`、媒体类型和尺寸 | 输出 `semantic.vision.summary`；可配置 `prompt` |
+| `proactive.topic` | 判断是否允许主动发话并组装提示词 | `semantic.vision.summary` | 输出 `semantic.proactive.*`、`semantic.text.prompt`；可配置 `enabled`、`instruction`、`min_interval_ms`、`dedup_window_ms` |
+| `llm.chat` | 调用文本 LLM | `semantic.text.prompt` | 输出 `semantic.text.response`；配置可扩展，通常使用 `{}` |
+| `emotion.rewrite` | 根据对话上下文总结情绪并改写回复 | `semantic.text.response`、`conversation.history` | 输出情绪标签和改写后的 `semantic.text.response`；无历史时可透传 |
+| `output.format` | 生成最终输出并维护对话历史 | `semantic.text.response` | 输出 `semantic.text.final`、`semantic.output.source`；无输出且主动策略拒绝时静默结束 |
+
+主动话题节点示例：
+
+```json
+{
+  "id": "proactive_topic",
+  "type": "proactive.topic",
+  "config": {
+    "enabled": true,
+    "min_interval_ms": 30000,
+    "dedup_window_ms": 300000,
+    "instruction": "请根据画面中最值得关注的新内容，以桌宠口吻自然地说一句简短中文。"
+  }
+}
+```
+
+其中：
+
+- `enabled=false`：关闭主动发话，但节点仍会正常结束。
+- `min_interval_ms`：两次视觉主动输出之间的最短间隔，单位为毫秒。
+- `dedup_window_ms`：相同视觉摘要指纹的抑制窗口，单位为毫秒。
+- 抑制原因会写入 `semantic.proactive.reason`，常见值为 `cooldown`、`duplicate_summary`、`disabled` 和 `vision_summary_missing`。
+
+#### 节点插入原则
+
+新增模块时，应优先读写以下公共语义 key：
+
+```text
+semantic.text.prompt       文本提示词
+semantic.text.response     中间回复
+semantic.text.final        最终回复
+semantic.vision.summary    视觉摘要
+semantic.proactive.topic   主动话题
+conversation.history      对话历史
+```
+
+不要让新节点直接依赖某个上游节点的私有 key，例如只读取 `llm.last_response`。完整 key 约定见 [AGENT_CONTEXT_KEY_PROTOCOL.md](AGENT_CONTEXT_KEY_PROTOCOL.md)。
+
 ### 4. TTS
 
 编辑 `tts_config.json`（服务地址、参考音频、语种等）。启动时会尝试拉起本地 GPT-SoVITS；失败时桌宠仍可运行，说话可能退化为仅文字气泡。
@@ -177,7 +276,7 @@ copy vision_llm_config.example.json vision_llm_config.json
    - **点击头/身体**：触摸动画
    - **右键菜单**：语音输入说明、视觉模型切换
    - **Ctrl+Alt+V**：开始/结束语音输入并提交给 Agent
-4. 截图感知默认约每 3 秒一帧；运行时空闲时立即进入视觉 DAG，已有 invocation 时按 FIFO 等待执行
+4. 截图感知默认约每 3 秒一帧；运行时空闲时立即进入视觉 DAG，已有 invocation 时视觉帧按内容去重并采用 latest-wins 等待执行
 
 ---
 
@@ -206,7 +305,7 @@ copy vision_llm_config.example.json vision_llm_config.json
 - 主动策略目前提供固定冷却和摘要指纹去重，尚未接入用户忙碌、语音播放和专注模式
 - 视觉帧按编码内容 hash 去重，但尚未实现感知级相似度检测
 - 情感标签尚未驱动桌宠动画状态
-- 文本 LLM 仓库仅提供 `llm_config.example.json`，需自行落地配置
+- 文本 LLM 使用本地 `llm_config.json`；示例模板为 `llm_config.example.json`，真实配置不会提交到 Git
 - `FRAMEWORK.md` 中的完整 `IModule`/`Agent` 模块中心仍在演进，当前主路径是 `MainWindow` + `AgentRuntime`
 
 ---

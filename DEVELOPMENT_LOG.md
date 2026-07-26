@@ -1000,7 +1000,140 @@ P4 多异步恢复：
 - 本轮新增 `InvocationQueuePolicy` 和 `AgentOutputPolicy`，从 `AgentRuntime` 抽离跨轮队列与主动输出状态职责。
 - 本轮新增应用入口级 Runtime 集成测试，覆盖用户输入、视觉帧写入和重复帧过滤。
 
-尚未完成：
+## 2026-07-26 主动策略、队列策略与文档完善
 
-- Runtime 主文件仍包含节点执行、异步恢复和 join 合并实现，后续应继续按模块拆分。
-- 主动策略尚未接入用户忙碌、TTS 播放状态、专注模式和语义相似度去重。
+### 1. 主动发话抑制策略落地
+
+本次将 `proactive.topic` 从“有摘要即发话”升级为带抑制策略的节点。
+
+新增/修改内容：
+
+- `proactive_topic_node.cpp` 新增 `IsSpeechAllowed`：
+  - 读取 `min_interval_ms`（默认 30000ms）
+  - 读取 `dedup_window_ms`（默认 300000ms）
+  - 使用 SHA-256 计算视觉摘要指纹
+  - 检查 `proactive.last_spoken_at` 实现冷却
+  - 检查 `proactive.last_summary_hash` 实现相同摘要抑制
+- `output.format` 成功视觉主动输出后，持久化：
+  - `proactive.last_spoken_at`
+  - `proactive.last_summary_hash`
+  - `semantic.vision.frame_hash`
+- 默认 DAG 配置和示例配置均补充了 `min_interval_ms` / `dedup_window_ms`。
+- 抑制原因明确写入 `semantic.proactive.reason`（cooldown / duplicate_summary 等）。
+
+当前效果：
+
+- 视觉主动发话不再无限制触发。
+- 相同画面摘要在冷却窗口内会被跳过。
+- 抑制决策对节点外部可见，便于后续 UI/日志展示。
+
+### 2. 视觉帧去重 + latest-wins 队列策略
+
+解决静止画面反复截图导致的重复视觉请求问题。
+
+实现内容：
+
+- `AgentRuntime::UpdatePerceptionFrame` 计算输入帧 SHA-256 内容指纹。
+- 相同指纹直接跳过，不更新上下文、不触发执行。
+- 引入 `m_lastPerceptionFrameHash` 作为运行时级最近接受帧缓存。
+- 新增 `InvocationQueuePolicy` 类，独立管理跨轮排队：
+  - 用户输入：严格 FIFO
+  - 视觉触发：latest-wins（同类等待项直接替换）
+- `AgentRuntime` 原有队列逻辑迁移到该策略类。
+- `CommitInvocationResult` 会把持久化 key（`proactive.*`、`semantic.vision.frame_hash`）提交到 session base。
+
+验证：
+
+- 重复视觉帧不会产生新 invocation。
+- 用户输入与视觉输入在活动轮期间可同时排队，互不覆盖。
+
+### 3. Runtime 文件拆分与策略模块化
+
+为后续继续拆分打基础。
+
+新增文件：
+
+- `include/vpet/agent/invocation_queue_policy.h`
+- `src/agent/invocation_queue_policy.cpp`
+- `include/vpet/agent/agent_output_policy.h`
+- `src/agent/agent_output_policy.cpp`
+
+改动：
+
+- `AgentRuntime` 仅保留调度、异步、Join、节点分发等核心逻辑。
+- 跨轮队列策略和主动输出持久化逻辑已抽离为独立可测试类。
+- `CMakeLists.txt` 同步更新所有测试目标和主程序链接。
+
+### 4. 应用级集成测试补齐
+
+新增文件：
+
+- `tests/application_integration_test.cpp`
+
+新增 CMake 测试目标：`application_integration_tests`
+
+覆盖场景：
+
+- 用户输入完整走 `user.input → llm.chat → output.format` 并得到最终输出。
+- 视觉帧写入后 `semantic.*` / 私有 key 正确填充。
+- 连续相同视觉帧被去重，第二帧不覆盖上下文。
+
+验证结果：
+
+- 在正确 64 位 MinGW + Qt 环境下：
+  - `agent_dag_graph_tests` 通过
+  - `agent_runtime_scheduler_tests` 通过（含新增抑制与去重测试）
+  - `application_integration_tests` 通过
+- CTest 3/3 通过。
+
+### 5. README 补充 DAG 修改方式与可用模块
+
+大幅扩充“Agent DAG”一节：
+
+- 新增“DAG 修改方式”小节，包含完整 JSON 示例、节点/边规则、trigger 裁剪说明、Join 冲突行为。
+- 列出 7 个当前可用模块及输入/输出/配置要点：
+  - `user.input`
+  - `vision.input`
+  - `vision.llm`
+  - `proactive.topic`
+  - `llm.chat`
+  - `emotion.rewrite`
+  - `output.format`
+- 给出 `proactive.topic` 完整配置示例和抑制原因说明。
+- 新增“节点插入原则”小节，强调必须使用 `semantic.*` 公共层。
+- 修正描述：用户输入 FIFO、视觉输入 latest-wins + 内容 hash 去重。
+- 明确 `llm_config.json` 是实际运行配置，`llm_config.example.json` 仅为模板。
+
+同步更新其他文档（协议、架构说明、构想.md）中的对应表述。
+
+### 6. 配置与工程规范修正
+
+- 项目根目录新增 `llm_config.json`（从示例模板落地）。
+- `.gitignore` 新增 `llm_config.json` 规则，防止真实 API Key 入库。
+- 确认 `AgentRuntime::FindDefaultLlmConfigPath` 及启动流程只查找 `llm_config.json`。
+
+### 7. 验证与发布情况
+
+- 使用 E:\Qt\6.9.2\mingw_64 + E:\Qt\Tools\mingw1310_64 完整 Ninja 构建成功。
+- 所有测试目标链接正常，运行时不出现 DLL 架构错误。
+- `git diff --check` 通过。
+- 变更已提交并推送至 `origin/ClaudeCode` 分支（commit 49ae586）。
+
+当前状态总结：
+
+- Agent 可靠性基础已具备（抑制 + 去重 + 排队策略）。
+- 文档已能指导用户直接修改 DAG 并理解每个模块作用。
+- 文本 LLM 配置已切换为标准 `llm_config.json`。
+- Runtime 开始模块化，但主文件仍较大，后续可继续拆分异步恢复、Join、节点执行等部分。
+
+后续建议（更新后）：
+
+1. 继续补齐用户忙碌、TTS 播放中、专注模式的主动抑制策略。
+2. 在感知管道层增加感知级画面变化检测（不只内容 hash）。
+3. 把 `llm.chat` 的温度、max_tokens 等参数暴露到节点 config。
+4. 完善情绪标签到动画状态的映射。
+5. 增加更多端到端应用场景测试（带真实 LLM + TTS 的冒烟测试）。
+
+---
+
+（日志末尾）
