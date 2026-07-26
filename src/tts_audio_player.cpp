@@ -1,8 +1,9 @@
 #include "vpet/tts_audio_player.h"
 
+#include <QAudioOutput>
 #include <QDebug>
 #include <QFileInfo>
-#include <QSoundEffect>
+#include <QMediaPlayer>
 #include <QUrl>
 
 namespace vpet
@@ -10,17 +11,34 @@ namespace vpet
 
 TtsAudioPlayer::TtsAudioPlayer(QObject *parent)
     : QObject(parent)
-    , m_soundEffect(nullptr)
+    , m_mediaPlayer(nullptr)
+    , m_audioOutput(nullptr)
 {
-    m_soundEffect = new QSoundEffect(this);
+    m_audioOutput = new QAudioOutput(this);
+    m_audioOutput->setVolume(1.0f);
 
-    connect(m_soundEffect, &QSoundEffect::playingChanged,
-            this, [this]()
+    m_mediaPlayer = new QMediaPlayer(this);
+    m_mediaPlayer->setAudioOutput(m_audioOutput);
+
+    connect(m_mediaPlayer, &QMediaPlayer::mediaStatusChanged,
+            this, [this](QMediaPlayer::MediaStatus status)
     {
-        if (!m_soundEffect->isPlaying())
+        if (status == QMediaPlayer::EndOfMedia)
         {
             emit PlaybackFinished();
         }
+    });
+
+    connect(m_mediaPlayer, &QMediaPlayer::errorOccurred,
+            this, [this](QMediaPlayer::Error error, const QString &errorString)
+    {
+        if (error == QMediaPlayer::NoError)
+        {
+            return;
+        }
+
+        qDebug() << "[TTS]   media player error:" << error << errorString;
+        emit PlaybackFinished();
     });
 }
 
@@ -29,7 +47,7 @@ TtsAudioPlayer::~TtsAudioPlayer()
     Stop();
 }
 
-void TtsAudioPlayer::Play(const QString &filePath)
+bool TtsAudioPlayer::Play(const QString &filePath)
 {
     qDebug() << "[TTS] TtsAudioPlayer::Play, file:" << filePath;
 
@@ -37,7 +55,13 @@ void TtsAudioPlayer::Play(const QString &filePath)
     if (filePath.isEmpty())
     {
         qDebug() << "[TTS]   FAILED - empty filePath";
-        return;
+        return false;
+    }
+
+    if ((m_mediaPlayer == nullptr) || (m_audioOutput == nullptr))
+    {
+        qDebug() << "[TTS]   FAILED - media player is null";
+        return false;
     }
 
     QFileInfo fileInfo(filePath);
@@ -45,31 +69,48 @@ void TtsAudioPlayer::Play(const QString &filePath)
     if (!fileInfo.exists() || !fileInfo.isFile())
     {
         qDebug() << "[TTS]   FAILED - file not found or not a file. exists:" << fileInfo.exists();
-        return;
+        return false;
+    }
+
+    if (fileInfo.size() <= 0)
+    {
+        qDebug() << "[TTS]   FAILED - empty audio file";
+        return false;
     }
 
     qDebug() << "[TTS]   file size:" << fileInfo.size() << "bytes";
 
     Stop();
 
-    m_soundEffect->setSource(QUrl::fromLocalFile(fileInfo.absoluteFilePath()));
-    m_soundEffect->setVolume(1.0f);
-    m_soundEffect->play();
+    m_mediaPlayer->setSource(QUrl::fromLocalFile(fileInfo.absoluteFilePath()));
+    m_audioOutput->setVolume(1.0f);
+    m_mediaPlayer->play();
 
     qDebug() << "[TTS]   playback started";
+    return true;
 }
 
 void TtsAudioPlayer::Stop()
 {
-    if (m_soundEffect->isPlaying())
+    if (m_mediaPlayer == nullptr)
     {
-        m_soundEffect->stop();
+        return;
+    }
+
+    if (m_mediaPlayer->playbackState() != QMediaPlayer::StoppedState)
+    {
+        m_mediaPlayer->stop();
     }
 }
 
 bool TtsAudioPlayer::IsPlaying() const
 {
-    return m_soundEffect->isPlaying();
+    if (m_mediaPlayer == nullptr)
+    {
+        return false;
+    }
+
+    return m_mediaPlayer->playbackState() == QMediaPlayer::PlayingState;
 }
 
 } // namespace vpet

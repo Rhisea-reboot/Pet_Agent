@@ -9,6 +9,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QScopeGuard>
 
 namespace vpet
 {
@@ -195,11 +196,13 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
         return;
     }
 
+    const auto replyGuard = qScopeGuard([reply]()
+    {
+        reply->deleteLater();
+    });
+
     // 从 reply 属性中获取本次请求的输出路径
     const QString outputPath = reply->property("outputPath").toString();
-
-    // 确保 reply 资源在函数结束时释放
-    reply->deleteLater();
 
     if (outputPath.isEmpty())
     {
@@ -218,13 +221,16 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - network error:" << reply->errorString();
         qDebug() << "[TTS]   server response body:" << QString::fromUtf8(errorBody);
+        emit SynthesisFinished(QString());
         return;
     }
 
     if (statusCode != 200)
     {
         const QByteArray errorBody = reply->readAll();
-        qDebug() << "[TTS]   FAILED - HTTP" << statusCode << "error body:" << QString::fromUtf8(errorBody);
+        qDebug() << "[TTS]   FAILED - HTTP" << statusCode
+                 << "error body:" << QString::fromUtf8(errorBody);
+        emit SynthesisFinished(QString());
         return;
     }
 
@@ -235,6 +241,7 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     if (audioData.isEmpty())
     {
         qDebug() << "[TTS]   FAILED - empty audio data";
+        emit SynthesisFinished(QString());
         return;
     }
 
@@ -244,12 +251,21 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     if (!outputFile.open(QIODevice::WriteOnly))
     {
         qDebug() << "[TTS]   FAILED - cannot write to:" << outputPath;
-        emit SynthesisFinished(outputPath);
+        emit SynthesisFinished(QString());
         return;
     }
 
     const qint64 bytesWritten = outputFile.write(audioData);
     outputFile.close();
+
+    if (bytesWritten != audioData.size())
+    {
+        qDebug() << "[TTS]   FAILED - incomplete audio write:" << bytesWritten
+                 << "expected:" << audioData.size();
+        QFile::remove(outputPath);
+        emit SynthesisFinished(QString());
+        return;
+    }
 
     qDebug() << "[TTS]   wrote" << bytesWritten << "bytes to" << outputPath;
     qDebug() << "[TTS]   synthesis SUCCESS, file:" << outputPath;
