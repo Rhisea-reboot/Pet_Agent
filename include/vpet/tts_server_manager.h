@@ -98,7 +98,7 @@ private slots:
     void OnProcessError(QProcess::ProcessError error);
 
     /**
-     * @brief 服务器进程意外退出
+     * @brief 服务器进程退出
      * @param[in] exitCode 退出码
      * @param[in] exitStatus 退出状态
      */

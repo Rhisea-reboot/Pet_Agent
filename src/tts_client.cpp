@@ -40,7 +40,7 @@ TtsClient::~TtsClient()
 
 bool TtsClient::LoadConfig(const QString &configPath)
 {
-    qDebug() << "[TTS] TtsClient::LoadConfig, path:" << configPath;
+    qDebug() << "[TTS] TtsClient::LoadConfig";
 
     // 检查参数有效性
     if (configPath.isEmpty())
@@ -53,7 +53,7 @@ bool TtsClient::LoadConfig(const QString &configPath)
 
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
-        qDebug() << "[TTS]   FAILED - cannot open config file:" << configPath;
+        qDebug() << "[TTS]   FAILED - cannot open config file";
         return false;
     }
 
@@ -105,9 +105,7 @@ bool TtsClient::LoadConfig(const QString &configPath)
     m_config.textLang = obj.value(QStringLiteral("text_lang")).toString(
                             QStringLiteral("zh"));
 
-    qDebug() << "[TTS]   serverUrl:" << m_config.serverUrl;
-    qDebug() << "[TTS]   refAudioPath:" << m_config.refAudioPath;
-    qDebug() << "[TTS]   promptText:" << m_config.promptText;
+    qDebug() << "[TTS]   configuration parsed";
 
     // 验证必要配置项
     if (m_config.refAudioPath.isEmpty())
@@ -130,8 +128,7 @@ bool TtsClient::IsConfigured() const
 void TtsClient::Synthesize(const QString &text, const QString &outputPath)
 {
     qDebug() << "[TTS] TtsClient::Synthesize";
-    qDebug() << "[TTS]   text:" << text;
-    qDebug() << "[TTS]   output:" << outputPath;
+    qDebug() << "[TTS]   text length:" << text.size();
 
     // 检查参数有效性
     if (!m_isConfigured)
@@ -168,8 +165,7 @@ void TtsClient::Synthesize(const QString &text, const QString &outputPath)
 
     const QByteArray bodyData = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
-    qDebug() << "[TTS]   POST to:" << (m_config.serverUrl + QStringLiteral("/tts"));
-    qDebug() << "[TTS]   body:" << QString::fromUtf8(bodyData);
+    qDebug() << "[TTS]   request body bytes:" << bodyData.size();
 
     QNetworkRequest request(QUrl(m_config.serverUrl + QStringLiteral("/tts")));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
@@ -220,7 +216,7 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     {
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - network error:" << reply->errorString();
-        qDebug() << "[TTS]   server response body:" << QString::fromUtf8(errorBody);
+        qDebug() << "[TTS]   server response bytes:" << errorBody.size();
         emit SynthesisFinished(QString());
         return;
     }
@@ -229,7 +225,7 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     {
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - HTTP" << statusCode
-                 << "error body:" << QString::fromUtf8(errorBody);
+                 << "response bytes:" << errorBody.size();
         emit SynthesisFinished(QString());
         return;
     }
@@ -250,7 +246,7 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
 
     if (!outputFile.open(QIODevice::WriteOnly))
     {
-        qDebug() << "[TTS]   FAILED - cannot write to:" << outputPath;
+        qDebug() << "[TTS]   FAILED - cannot write output file";
         emit SynthesisFinished(QString());
         return;
     }
@@ -267,8 +263,8 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
         return;
     }
 
-    qDebug() << "[TTS]   wrote" << bytesWritten << "bytes to" << outputPath;
-    qDebug() << "[TTS]   synthesis SUCCESS, file:" << outputPath;
+    qDebug() << "[TTS]   wrote audio bytes:" << bytesWritten;
+    qDebug() << "[TTS]   synthesis SUCCESS";
 
     emit SynthesisFinished(outputPath);
 }

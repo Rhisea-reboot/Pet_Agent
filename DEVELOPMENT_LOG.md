@@ -1134,6 +1134,148 @@ P4 多异步恢复：
 4. 完善情绪标签到动画状态的映射。
 5. 增加更多端到端应用场景测试（带真实 LLM + TTS 的冒烟测试）。
 
+## 2026-07-27 外部评审建议整改与状态核验
+
+本轮依据 `来自fable5的评判及项目建议.md` 对安全、隐私、生命周期、Agent 输出契约和 UI 性能问题进行整改，并按当前工作树重新核验实施状态。
+
+### 1. 本周高风险整改已落地
+
+- 截图感知改为默认关闭，只有用户通过右键菜单主动开启后才启动；运行期间显示红色指示点，并明确提示画面将发送到外部 API。
+- 移除栈上 `TtsServerManager` 与 `MainWindow` 的 QObject 父子关系，修复退出时可能发生的重复析构和堆损坏。
+- 语音输入停止录音后不再立即启动 ASR；改为等待 `QMediaRecorder::StoppedState`，确保 WAV 写入完成。
+- `AgentOutputReady` 统一移到 executor 的 invocation 完成回调发射，使纯同步 DAG、Vision 终止 DAG 和默认异步链都遵守同一输出契约。
+- 新增纯同步终止图的输出信号回归测试，并在默认链测试中断言最终输出。
+- `PetController` 只在帧路径或气泡内容实际变化时发射信号；`MainWindow` 使用 `QPixmapCache` 缓存缩放后的动画帧。
+- 缺少 Say 动画资源时直接显示文本气泡并清理等待状态，避免回答丢失、无限重排队和逐帧日志刷屏。
+- 修复模型菜单 `QActionGroup` 生命周期不足导致单选互斥失效的问题。
+
+### 2. Runtime 模块化进展
+
+新增并从 `agent_runtime.cpp` 中拆出：
+
+- `AgentGraphExecutor`
+- `AgentNodeRegistry`
+- `AgentAsyncBridge`
+
+上述模块已经加入 CMake 主程序和测试目标。Runtime 主文件仍保留 vision/input、vision/LLM、LLM chat 和 output format 等节点实现，后续仍需继续拆分。
+
+### 3. 工程目录整理进展
+
+- `CMakeLists.txt.user` 已从跟踪内容中删除，并加入 `.gitignore`。
+- 新增 `.gitattributes`，统一文本换行规则并将 PNG 标记为二进制文件。
+- 根目录手工测试驱动迁移到 `tests/manual/`。
+
+以上工程目录整理内容已纳入本轮整改提交范围。
+
+### 4. P0/P1 状态
+
+P0 尚未完全清零：
+
+- 根目录本地 `llm_config.json` 仍包含已外传的真实 DeepSeek API Key。虽然文件被 `.gitignore` 排除且 Git 历史中未发现该 Key，但旧 Key 必须在服务商控制台吊销和轮换后才能关闭此 P0。
+- 新 Key 后续应从环境变量、Windows Credential Manager 或项目目录外的 `%APPDATA%` 配置读取，不应继续保存在项目目录。
+
+剩余主要 P1：
+
+- 动画加载尚未校验必需 Idle/Nomal 资源。
+
+### 5. 验证状态
+
+- 已完成当前工作树的源码级逐项核验。
+- 使用 `E:\Qt\6.9.2\mingw_64`、`E:\Qt\Tools\mingw1310_64`、CMake 和 Ninja 创建独立 Debug 构建目录 `build/verification-qt6.9.2-mingw-path`。
+- 当前工作树全量构建成功，`VPet.exe`、`agent_dag_graph_tests.exe`、`agent_runtime_scheduler_tests.exe` 和 `application_integration_tests.exe` 均成功链接。
+- CTest 3/3 通过，0 个测试失败：
+  - `agent_dag_graph_tests` 通过。
+  - `agent_runtime_scheduler_tests` 通过。
+  - `application_integration_tests` 通过。
+- 首次直接调用 MinGW 编译器时因工具链目录未加入 `PATH` 而无法启动；补充 MinGW、Qt、CMake 和 Ninja 的 `bin` 路径后，干净配置、构建和测试全部通过。该问题属于命令行环境配置，不是源码或测试失败。
+
+### 6. 下一步顺序
+
+1. 立即吊销并轮换已暴露的 DeepSeek Key，完成 P0 闭环。
+2. 校验动画必需资源并为缺失资源提供明确错误。
+3. 继续关闭评审中剩余的 P1/P2 项。
+
+## 2026-07-28 敏感日志、MiMo 响应与 Voice 临时文件整改
+
+### 1. 敏感日志默认脱敏
+
+- Vision LLM 不再输出完整响应 JSON；成功和失败路径只记录 request ID、HTTP 状态和响应字节数。
+- Text LLM 的非 2xx 错误不再把服务端响应正文写入错误消息。
+- TTS 不再记录参考音频路径、prompt text、待合成文本、请求 JSON、服务端错误正文及临时音频路径；改为记录状态、字符数和字节数。
+- Voice Input 和 Agent UI 回调不再输出转写正文、模型回复或最终回答，只记录字符数和请求元数据。
+- GPT-SoVITS 进程异常退出时只记录 stderr 字节数，不记录可能包含用户文本或本地路径的正文。
+
+### 2. MiMo 响应字段兼容
+
+- MiMo 响应优先读取标准 `choices[0].message.content`。
+- 仅当 `content` 去除空白后为空时，才回退读取 `reasoning_content`。
+- GPT 和 MiMo 的提取结果统一执行首尾空白清理。
+
+### 3. Voice 临时文件生命周期收口
+
+- `VoiceInputManager` 显式保存当前 session 临时目录，并由同一类负责创建和释放。
+- ASR 成功、ASR 失败、输出读取失败、ASR 启动失败、录音器错误和析构路径均调用统一清理函数。
+- 清理同时删除 WAV、ASR 输出和 session 子目录，并清空所有关联路径状态。
+- 删除失败时保留 session 路径，避免丢失后续重试清理的能力；下一次录音开始前必须先成功清理上一轮目录。
+- ASR 进程失败消息只保留退出码和 stdout/stderr 字节数，不再传播进程正文。
+
+### 4. 验证结果
+
+- Qt 6.9.2 + MinGW 13.1 Debug 增量构建成功，`VPet.exe` 和三个测试目标均成功链接。
+- CTest 3/3 通过，0 个测试失败。
+- 敏感正文日志静态扫描未再发现 Vision/TTS/Voice/Agent 正文输出。
+- `git diff --check` 未发现空白错误，仅有工作树既有的 LF/CRLF 转换提示。
+- MiMo 字段选择函数目前是私有静态实现，现有测试未提供 HTTP reply 注入接口；本轮通过源码分支复核和全量回归测试验证，后续可在 LLM 客户端测试解耦时补专门单元测试。
+
+## 2026-07-28 TTS 端口清理与 Ready 后崩溃修复
+
+### 1. TTS 进程所有权收敛
+
+修改文件：
+
+- `include/vpet/tts_server_manager.h`
+- `src/tts_server_manager.cpp`
+
+修复内容：
+
+- 删除启动前通过 PowerShell 查询并强制终止 `9880` 端口占用进程的逻辑。
+- 删除端口清理后的主线程固定休眠，避免 TTS 启动阶段同步阻塞 UI。
+- `TtsServerManager` 只停止自身 `QProcess` 启动并持有的 GPT-SoVITS 进程，不再影响其他应用或用户手工启动的服务。
+- TTS 子进程启动失败时立即释放 `QProcess`，允许后续重新调用 `Start()`。
+- `Stop()` 主动断开进程回调后再终止当前子进程，避免正常退出被误报为服务崩溃。
+
+### 2. Ready 后异常退出处理
+
+修复内容：
+
+- `OnProcessFinished()` 不再因服务已经 Ready 而跳过退出处理。
+- 子进程退出后统一停止并释放健康检查定时器、将 `m_isReady` 复位为 `false`、释放进程对象。
+- Ready 后退出会发出明确的 `StatusChanged` 和 `ServerStartFailed`，错误信息包含退出码。
+- `errorOccurred` 的终止类错误交由 `finished` 统一收口，避免重复报告，并保留退出前 Ready 状态用于准确诊断。
+- 健康检查回调在进程已退出或对象已释放时不会再把服务错误标记为 Ready。
+- 异常退出清理完成后，管理器可再次启动新的 TTS 子进程。
+
+当前效果：
+
+- VPet 不再强杀任意占用 `9880` 端口的进程。
+- TTS 服务 Ready 后崩溃会立即撤销就绪状态并报告失败。
+- 正常关闭只回收本应用持有的 TTS 子进程，不产生意外退出告警。
+
+### 3. 验证情况
+
+- 使用 Qt 6.9.2、MinGW 13.1 和 CMake 完成 `VPet.exe` 全量增量构建，构建成功。
+- 执行 CTest，`agent_dag_graph_tests`、`agent_runtime_scheduler_tests`、`application_integration_tests` 全部通过。
+- CTest 结果：3/3 通过，0 失败。
+- `git diff --check` 未发现本轮新增空白格式错误；仅有仓库换行转换提示。
+
+### 4. 提交前审查修复
+
+- TTS 同步启动失败时不再进入 60 秒等待循环。
+- 健康检查超时会立即停止并回收本应用启动的 Python 子进程。
+- Agent invocation 完成回调改在清理 trigger 前执行；自定义视觉终止图未显式写入 output source 时，会依据本轮 vision trigger 返回 `vision_proactive`。
+- 同步终止图回归测试改为真实视觉触发，并验证无需节点手工写 source 也能得到正确来源。
+- 修复后使用 Qt 6.9.2 + MinGW 13.1 完成增量构建，CTest 3/3 通过。
+
 ---
 
 （日志末尾）

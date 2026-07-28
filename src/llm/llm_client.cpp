@@ -303,7 +303,8 @@ void LlmClient::OnReplyFinished(QNetworkReply *reply)
 
     if ((statusCode < 200) || (statusCode >= 300))
     {
-        const QString message = QStringLiteral("LLM HTTP error: %1").arg(QString::fromUtf8(responseData));
+        const QString message = QStringLiteral("LLM HTTP error. Response bytes: %1.")
+                                .arg(responseData.size());
         emit ChatFailed(requestId, message, statusCode);
         return;
     }

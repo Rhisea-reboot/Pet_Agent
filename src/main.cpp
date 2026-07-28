@@ -123,8 +123,8 @@ int main(int argc, char *argv[])
         ttsServerReady = true;
     });
 
-    // 启动 TTS 服务（内部同步失败会立即发射 ServerStartFailed → waitLoop.quit）
-    // 启动成功则进入异步健康检查，就绪后发射 ServerReady → waitLoop.quit
+    // 启动 TTS 服务；同步失败时不进入事件循环，避免无效等待安全超时。
+    // 启动成功则进入异步健康检查，就绪后发射 ServerReady → waitLoop.quit。
     // 超时（约 36 秒）后也会发射 ServerStartFailed → waitLoop.quit
     // 安全网：如果因任何原因两个信号都没发射，60 秒后强制退出等待
     QTimer safetyTimer;
@@ -134,9 +134,10 @@ int main(int argc, char *argv[])
 
     safetyTimer.start(60000);
 
-    ttsServerManager.Start(QString());
-
-    waitLoop.exec();
+    if (ttsServerManager.Start(QString()))
+    {
+        waitLoop.exec();
+    }
 
     safetyTimer.stop();
 
@@ -189,14 +190,13 @@ int main(int argc, char *argv[])
         // TtsClient 会通过 tts_config.json 自行完成 HTTP 请求配置
     }
 
-    // 将 TtsServerManager 的所有权转移给 window，确保进程生命周期
-    ttsServerManager.setParent(&window);
-
+    // 不调用 setParent：ttsServerManager 是栈对象，挂到 QObject 树会在
+    // ~MainWindow 中被 delete，随后栈展开再析构一次，构成未定义行为。
     window.show();
 
     const int exitCode = application.exec();
 
-    // 退出前停止 TTS 服务
+    // 退出前停止 TTS 服务（窗口已销毁，栈对象仍有效）
     ttsServerManager.Stop();
 
     return exitCode;

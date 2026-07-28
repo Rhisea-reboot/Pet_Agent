@@ -92,6 +92,9 @@ PetController::PetController(const QString &animationBasePath, QObject *parent)
     , m_queuedSayText()
     , m_queuedSayAction()
     , m_queuedSaySource(SaySource::IdleRandom)
+    , m_lastEmittedFramePath()
+    , m_lastEmittedBubbleVisible(false)
+    , m_lastEmittedBubbleText()
 {
 }
 
@@ -381,7 +384,7 @@ void PetController::OnUpdate()
             // 显示气泡
             if (!m_currentSayText.isEmpty())
             {
-                qDebug() << "[TTS]   bubble shown:" << m_currentSayText;
+                qDebug() << "[TTS]   bubble shown, characters:" << m_currentSayText.size();
                 m_bubbleMessage.Show(m_currentSayText, SAY_BUBBLE_DURATION_MS);
                 emit BubbleChanged(true, m_currentSayText);
                 emit SayTextReady(m_currentSayText);
@@ -391,7 +394,7 @@ void PetController::OnUpdate()
             if (!m_pendingAudioPath.isEmpty()
                 && (m_ttsAudioPlayer != nullptr))
             {
-                qDebug() << "[TTS]   playing pre-synthesized audio:" << m_pendingAudioPath;
+                qDebug() << "[TTS]   playing pre-synthesized audio";
 
                 const bool playStarted = m_ttsAudioPlayer->Play(m_pendingAudioPath);
 
@@ -471,12 +474,22 @@ void PetController::OnUpdate()
 
     const QString framePath = GetCurrentFramePath();
 
-    if (!framePath.isEmpty())
+    if (!framePath.isEmpty() && (framePath != m_lastEmittedFramePath))
     {
+        m_lastEmittedFramePath = framePath;
         emit FrameChanged(framePath);
     }
 
-    emit BubbleChanged(m_bubbleMessage.IsVisible(), m_bubbleMessage.GetText());
+    const bool bubbleVisible = m_bubbleMessage.IsVisible();
+    const QString bubbleText = m_bubbleMessage.GetText();
+
+    if ((bubbleVisible != m_lastEmittedBubbleVisible)
+        || (bubbleText != m_lastEmittedBubbleText))
+    {
+        m_lastEmittedBubbleVisible = bubbleVisible;
+        m_lastEmittedBubbleText = bubbleText;
+        emit BubbleChanged(bubbleVisible, bubbleText);
+    }
 }
 
 void PetController::UpdateWalkPosition(int deltaTimeMs)
@@ -592,8 +605,8 @@ bool PetController::StartSayText(const QString &text,
 
     if (sayAction.isEmpty())
     {
-        qDebug() << "[TTS] Say request rejected because no say action is available.";
-        return false;
+        // 无 Animation/Say 资源时：直接出气泡，清空队列，避免 16ms 重试刷屏。
+        return ShowSayTextWithoutAction(normalizedText, source);
     }
 
     const PET_STATE currentState = m_stateMachine.GetCurrentState();
@@ -611,8 +624,8 @@ bool PetController::StartSayText(const QString &text,
     m_pendingAudioPath.clear();
 
     qDebug() << "[TTS] Say request accepted, source:" << SaySourceToString(source)
-             << "action:" << sayAction;
-    qDebug() << "[TTS]   selected text:" << m_currentSayText;
+             << "action:" << sayAction
+             << "characters:" << m_currentSayText.size();
 
     if ((m_ttsClient != nullptr) && m_ttsClient->IsConfigured())
     {
@@ -627,7 +640,7 @@ bool PetController::StartSayText(const QString &text,
         m_pendingSayAction = sayAction;
         m_synthesisCounter += 1;
 
-        qDebug() << "[TTS]   synthesizing audio first, output:" << m_pendingAudioPath;
+        qDebug() << "[TTS]   synthesizing audio first";
         m_ttsClient->Synthesize(m_currentSayText, m_pendingAudioPath);
         return true;
     }
@@ -639,6 +652,36 @@ bool PetController::StartSayText(const QString &text,
         m_currentSayText.clear();
         return QueueSayText(normalizedText, source);
     }
+
+    return true;
+}
+
+bool PetController::ShowSayTextWithoutAction(const QString &text, SaySource source)
+{
+    const QString normalizedText = text.trimmed();
+
+    if (normalizedText.isEmpty())
+    {
+        return false;
+    }
+
+    m_queuedSayText.clear();
+    m_queuedSayAction.clear();
+    m_queuedSaySource = SaySource::IdleRandom;
+    m_pendingSayAction.clear();
+    m_pendingAudioPath.clear();
+    m_discardPendingSynthesis = false;
+    m_currentSayText = normalizedText;
+    m_currentSaySource = source;
+    m_pendingSaySource = source;
+    m_sayCooldownRemainingMs = SAY_TRIGGER_COOLDOWN_MS;
+
+    qDebug() << "[TTS] Say fallback without assets, source:" << SaySourceToString(source);
+    m_bubbleMessage.Show(normalizedText, SAY_BUBBLE_DURATION_MS);
+    m_lastEmittedBubbleVisible = true;
+    m_lastEmittedBubbleText = normalizedText;
+    emit BubbleChanged(true, normalizedText);
+    emit SayTextReady(normalizedText);
 
     return true;
 }
@@ -742,7 +785,7 @@ void PetController::ClampPositionToScreen(QPoint &position) const
 
 void PetController::OnTtsSynthesisFinished(const QString &filePath)
 {
-    qDebug() << "[TTS] OnTtsSynthesisFinished, filePath:" << filePath;
+    qDebug() << "[TTS] OnTtsSynthesisFinished, file available:" << !filePath.isEmpty();
 
     if (m_discardPendingSynthesis)
     {
@@ -884,8 +927,7 @@ void PetController::OnAudioPlaybackFinished()
         if (audioFile.exists())
         {
             const bool removed = audioFile.remove();
-            qDebug() << "[TTS]   deleted audio file:" << m_pendingAudioPath
-                     << "success:" << removed;
+            qDebug() << "[TTS]   deleted audio file, success:" << removed;
         }
 
         m_pendingAudioPath.clear();

@@ -1,4 +1,6 @@
 build/
+CMakeLists.txt.user
+*.user
 *.exe
 *.dll
 *.out

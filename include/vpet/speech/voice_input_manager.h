@@ -1,12 +1,12 @@
 #ifndef VPET_SPEECH_VOICE_INPUT_MANAGER_H
 #define VPET_SPEECH_VOICE_INPUT_MANAGER_H
 
+#include <QMediaRecorder>
 #include <QObject>
 #include <QString>
 
 class QAudioInput;
 class QMediaCaptureSession;
-class QMediaRecorder;
 class QProcess;
 
 namespace vpet
@@ -88,6 +88,12 @@ private slots:
      */
     void OnRecorderError();
 
+    /**
+     * @brief 处理录音器状态变化
+     * @param[in] state 录音器状态
+     */
+    void OnRecorderStateChanged(QMediaRecorder::RecorderState state);
+
 private:
     /**
      * @brief 准备本次录音目录
@@ -123,15 +129,23 @@ private:
      */
     bool ReadTranscriptionText(QString &text, QString &errorMessage) const;
 
+    /**
+     * @brief 删除当前语音会话产生的临时目录并清空路径状态
+     * @return 目录不存在或删除成功返回 true
+     */
+    bool CleanupRecordDirectory();
+
     QMediaCaptureSession *m_captureSession; ///< Qt 多媒体采集会话
     QAudioInput *m_audioInput;              ///< 麦克风输入
     QMediaRecorder *m_mediaRecorder;        ///< 音频录制器
     QProcess *m_asrProcess;                 ///< GPT-SoVITS ASR 进程
+    QString m_recordSessionDirectory;       ///< 当前语音会话临时目录
     QString m_recordInputDirectory;         ///< 当前录音输入目录
     QString m_recordOutputDirectory;        ///< 当前 ASR 输出目录
     QString m_recordAudioPath;              ///< 当前录音文件路径
     QString m_asrOutputFilePath;            ///< 当前 ASR 输出 list 文件路径
     bool m_isRecording;                     ///< 是否正在录音
+    bool m_awaitingRecorderStop;            ///< 是否等待录音器真正停止后再启动 ASR
 };
 
 } // namespace vpet

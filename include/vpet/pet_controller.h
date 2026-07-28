@@ -272,6 +272,14 @@ private:
     void TryStartQueuedSay();
 
     /**
+     * @brief 无 Say 动画资源时，仅显示气泡并清空队列
+     * @param[in] text 说话文本
+     * @param[in] source 说话来源
+     * @return 文本非空时返回 true
+     */
+    bool ShowSayTextWithoutAction(const QString &text, SaySource source);
+
+    /**
      * @brief 将窗口位置限制在屏幕边界内
      * @param[in,out] position 待限制的位置
      */
@@ -308,6 +316,9 @@ private:
     QString m_queuedSayText;                    ///< 下一条待播放 Say 文本
     QString m_queuedSayAction;                  ///< 下一条待播放 Say 动作名
     SaySource m_queuedSaySource;                ///< 下一条待播放 Say 来源
+    QString m_lastEmittedFramePath;             ///< 最近一次已发射的帧路径
+    bool m_lastEmittedBubbleVisible;            ///< 最近一次已发射的气泡可见性
+    QString m_lastEmittedBubbleText;            ///< 最近一次已发射的气泡文本
 };
 
 } // namespace vpet

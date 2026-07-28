@@ -98,17 +98,14 @@ QString ResolveVisionMediaType(const QString &modality)
 
 AgentRuntime::AgentRuntime(QObject *parent)
     : QObject(parent)
-    , m_dagGraph()
     , m_context()
     , m_sessionContext()
     , m_llmClient(new LlmClient(this))
     , m_visionLlmClient(new VisionLlmClient(this))
-    , m_nodeHandlers()
-    , m_executionOrder()
-    , m_invocationState()
+    , m_nodeRegistry()
+    , m_graphExecutor()
+    , m_asyncBridge()
     , m_invocationQueue()
-    , m_nextInvocationId(0)
-    , m_directRequestIds()
     , m_lastPerceptionFrameHash()
     , m_isLoaded(false)
     , m_contextWasQueued(false)
@@ -138,30 +135,22 @@ bool AgentRuntime::Load(const QString &configPath, QString &errorMessage)
         return false;
     }
 
-    if (m_invocationState.isActive || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
+    if (m_graphExecutor.IsActive() || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
     {
         errorMessage = QStringLiteral("Agent runtime cannot load a DAG during an active invocation.");
         return false;
     }
 
-    if (!m_dagGraph.LoadFromJsonFile(configPath, errorMessage))
+    if (!m_graphExecutor.Load(configPath, errorMessage))
     {
         m_isLoaded = false;
-        m_executionOrder.clear();
-        return false;
-    }
-
-    if (!m_dagGraph.TopologicalSort(m_executionOrder, errorMessage))
-    {
-        m_isLoaded = false;
-        m_executionOrder.clear();
         return false;
     }
 
     m_isLoaded = true;
 
     qDebug() << "[Agent] DAG loaded:" << configPath;
-    qDebug() << "[Agent] Topological order:" << m_executionOrder;
+    qDebug() << "[Agent] Topological order:" << m_graphExecutor.GetExecutionOrder();
 
     return true;
 }
@@ -174,13 +163,13 @@ bool AgentRuntime::Execute(QString &errorMessage)
         return false;
     }
 
-    if (m_executionOrder.isEmpty())
+    if (m_graphExecutor.GetExecutionOrder().isEmpty())
     {
         errorMessage = QStringLiteral("Agent runtime execution order is empty.");
         return false;
     }
 
-    if (m_invocationState.isActive || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
+    if (m_graphExecutor.IsActive() || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
     {
         if (m_contextWasQueued)
         {
@@ -206,12 +195,18 @@ bool AgentRuntime::Execute(QString &errorMessage)
         m_context = m_sessionContext.Snapshot();
     }
 
-    if (!BeginInvocation(errorMessage))
+    if (!m_graphExecutor.BeginInvocation(m_context,
+                                         m_asyncBridge.HasPending(),
+                                         errorMessage))
     {
         return false;
     }
 
-    return PumpReadyQueue(true, errorMessage);
+    return m_graphExecutor.PumpReadyQueue(true,
+                                          m_context,
+                                          m_sessionContext,
+                                          BuildGraphCallbacks(),
+                                          errorMessage);
 }
 
 bool AgentRuntime::ExecuteWithUserInput(const QString &userInput, QString &errorMessage)
@@ -242,7 +237,7 @@ bool AgentRuntime::ExecuteWithUserInput(const QString &userInput, QString &error
     }
 
     if (m_isLoaded
-        && (m_invocationState.isActive
+        && (m_graphExecutor.IsActive()
             || HasPendingAsyncRequest()
             || !m_invocationQueue.IsEmpty()))
     {
@@ -457,7 +452,7 @@ bool AgentRuntime::UpdatePerceptionFrame(const QByteArray &encodedData,
 
     m_context.RemoveValue(AgentContextKeys::USER_INPUT);
 
-    if (m_invocationState.isActive || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
+    if (m_graphExecutor.IsActive() || HasPendingAsyncRequest() || !m_invocationQueue.IsEmpty())
     {
         if (!EnqueueInvocation(m_context))
         {
@@ -542,8 +537,7 @@ VISION_LLM_MODEL_PROFILE AgentRuntime::GetActiveVisionLlmProfile() const
 
 bool AgentRuntime::HasPendingAsyncRequest() const
 {
-    return !m_invocationState.pendingByRequestId.isEmpty()
-           || !m_directRequestIds.isEmpty();
+    return m_asyncBridge.HasRequests();
 }
 
 bool AgentRuntime::Start(const QString &configPath, QString &errorMessage)
@@ -566,7 +560,7 @@ bool AgentRuntime::Start(const QString &configPath, QString &errorMessage)
 
 QVector<QString> AgentRuntime::GetExecutionOrder() const
 {
-    return m_executionOrder;
+    return m_graphExecutor.GetExecutionOrder();
 }
 
 AgentContext &AgentRuntime::GetContext()
@@ -587,414 +581,14 @@ void AgentRuntime::SetContext(const AgentContext &context)
 
 bool AgentRuntime::RegisterNodeHandler(const QString &nodeType, const NodeHandler &handler)
 {
-    const QString normalizedNodeType = nodeType.trimmed();
-
-    if (normalizedNodeType.isEmpty())
-    {
-        return false;
-    }
-
-    if (!handler)
-    {
-        return false;
-    }
-
-    m_nodeHandlers.insert(normalizedNodeType, handler);
-
-    return true;
+    return m_nodeRegistry.Register(nodeType, handler);
 }
 
 bool AgentRuntime::ExecuteNode(const _tagAgentDagNode &node,
                                AgentContext &context,
                                QString &errorMessage)
 {
-    const QString nodeId = node.id.trimmed();
-    const QString nodeType = node.type.trimmed();
-
-    if (nodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime node id is empty.");
-        return false;
-    }
-
-    if (nodeType.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime node type is empty: %1").arg(nodeId);
-        return false;
-    }
-
-    if (!context.AppendExecutedNode(nodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to record executed node.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_LAST_NODE_TYPE, nodeType))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to record node type: %1").arg(nodeId);
-        return false;
-    }
-
-    if (!m_nodeHandlers.contains(nodeType))
-    {
-        errorMessage = QStringLiteral("Agent node handler is not registered: %1").arg(nodeType);
-        return false;
-    }
-
-    const NodeHandler handler = m_nodeHandlers.value(nodeType);
-
-    if (!handler)
-    {
-        errorMessage = QStringLiteral("Agent node handler is invalid: %1").arg(nodeType);
-        return false;
-    }
-
-    if (!PrepareNodeInputAliases(node, context))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to prepare node input aliases: %1").arg(
-                           nodeId);
-        return false;
-    }
-
-    if (!handler(node, context, errorMessage))
-    {
-        return false;
-    }
-
-    if (!SyncNodeOutputAliases(node, context))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to sync node output aliases: %1").arg(
-                           nodeId);
-        return false;
-    }
-
-    return true;
-}
-
-bool AgentRuntime::PrepareNodeInputAliases(const _tagAgentDagNode &node, AgentContext &context)
-{
-    const QString nodeType = node.type.trimmed();
-
-    if (nodeType.isEmpty())
-    {
-        return false;
-    }
-
-    QVariant value;
-
-    if (nodeType == NODE_TYPE_LLM_CHAT)
-    {
-        if (context.GetValue(CONTEXT_KEY_NODE_INPUT_PROMPT, value))
-        {
-            return context.SetValue(CONTEXT_KEY_PROMPT_TEXT, value);
-        }
-
-        if (context.GetValue(CONTEXT_KEY_SEMANTIC_TEXT_PROMPT, value))
-        {
-            return context.SetValue(CONTEXT_KEY_NODE_INPUT_PROMPT, value)
-                   && context.SetValue(CONTEXT_KEY_PROMPT_TEXT, value);
-        }
-
-        if (context.GetValue(CONTEXT_KEY_PROMPT_TEXT, value))
-        {
-            return context.SetValue(CONTEXT_KEY_NODE_INPUT_PROMPT, value)
-                   && context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_PROMPT, value);
-        }
-
-        return true;
-    }
-
-    if (nodeType == NODE_TYPE_EMOTION_REWRITE)
-    {
-        if (context.GetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, value))
-        {
-            return context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value)
-                   && context.SetValue(AgentContextKeys::LLM_LAST_RESPONSE, value);
-        }
-
-        if (context.GetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value))
-        {
-            return context.SetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, value)
-                   && context.SetValue(AgentContextKeys::LLM_LAST_RESPONSE, value);
-        }
-
-        if (context.GetValue(AgentContextKeys::LLM_LAST_RESPONSE, value))
-        {
-            return context.SetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, value)
-                   && context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value);
-        }
-
-        return true;
-    }
-
-    if (nodeType == NODE_TYPE_OUTPUT_FORMAT)
-    {
-        if (context.GetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value)
-            || context.GetValue(CONTEXT_KEY_NODE_OUTPUT_TEXT_RESPONSE, value)
-            || context.GetValue(CONTEXT_KEY_EMOTION_OUTPUT_TEXT, value)
-            || context.GetValue(AgentContextKeys::LLM_LAST_RESPONSE, value)
-            || context.GetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, value))
-        {
-            return context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value)
-                   && context.SetValue(CONTEXT_KEY_NODE_INPUT_TEXT_RESPONSE, value);
-        }
-
-        return true;
-    }
-
-    return true;
-}
-
-bool AgentRuntime::SyncNodeOutputAliases(const _tagAgentDagNode &node, AgentContext &context)
-{
-    const QString nodeType = node.type.trimmed();
-
-    if (nodeType.isEmpty())
-    {
-        return false;
-    }
-
-    QVariant value;
-
-    if (nodeType == NODE_TYPE_LLM_CHAT)
-    {
-        if (context.GetValue(AgentContextKeys::LLM_LAST_RESPONSE, value))
-        {
-            return context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value)
-                   && context.SetValue(CONTEXT_KEY_NODE_OUTPUT_TEXT_RESPONSE, value);
-        }
-
-        return true;
-    }
-
-    if (nodeType == NODE_TYPE_EMOTION_REWRITE)
-    {
-        if (context.GetValue(CONTEXT_KEY_EMOTION_OUTPUT_TEXT, value))
-        {
-            return context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, value)
-                   && context.SetValue(CONTEXT_KEY_NODE_OUTPUT_TEXT_RESPONSE, value);
-        }
-
-        return true;
-    }
-
-    if (nodeType == NODE_TYPE_OUTPUT_FORMAT)
-    {
-        if (context.GetValue(CONTEXT_KEY_OUTPUT_TEXT, value))
-        {
-            return context.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_FINAL, value)
-                   && context.SetValue(CONTEXT_KEY_NODE_OUTPUT_TEXT_FINAL, value);
-        }
-
-        return true;
-    }
-
-    return true;
-}
-
-bool AgentRuntime::BeginInvocation(QString &errorMessage)
-{
-    if (!m_isLoaded)
-    {
-        errorMessage = QStringLiteral("Agent runtime is not loaded.");
-        return false;
-    }
-
-    if (m_invocationState.isActive || HasPendingAsyncRequest())
-    {
-        errorMessage = QStringLiteral("Agent runtime invocation is already active.");
-        return false;
-    }
-
-    const QVector<QString> allSourceNodes = m_dagGraph.GetSourceNodes();
-
-    if (allSourceNodes.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime DAG has no source node.");
-        return false;
-    }
-
-    m_invocationState.remainingInDegree = m_dagGraph.GetInDegreeMap();
-    m_invocationState.nodeDeclarationOrder.clear();
-    m_invocationState.readyQueue.clear();
-    m_invocationState.completedNodeIds.clear();
-    m_invocationState.nodeExecutionResults.clear();
-    m_invocationState.branches.clear();
-    m_invocationState.nodeBranchIds.clear();
-    m_invocationState.nodeResults.clear();
-    m_invocationState.pendingByRequestId.clear();
-    m_invocationState.activeNodeIds.clear();
-    m_invocationState.failureMessage.clear();
-    m_invocationState.hasFailed = false;
-
-    const QVector<QString> nodeNames = m_dagGraph.GetNodeNames();
-
-    if (m_invocationState.remainingInDegree.size() != nodeNames.size())
-    {
-        errorMessage = QStringLiteral("Agent runtime DAG invocation state is incomplete.");
-        return false;
-    }
-
-    for (int nodeIndex = 0; nodeIndex < nodeNames.size(); ++nodeIndex)
-    {
-        const QString &nodeId = nodeNames.at(nodeIndex);
-        m_invocationState.nodeDeclarationOrder.insert(nodeId, nodeIndex);
-    }
-
-    QVariant triggerValue;
-
-    if (m_context.GetValue(CONTEXT_KEY_RUNTIME_TRIGGER_TYPE, triggerValue))
-    {
-        m_invocationState.trigger = triggerValue.toString().trimmed();
-    }
-    else
-    {
-        m_invocationState.trigger.clear();
-    }
-
-    ++m_nextInvocationId;
-
-    if (m_nextInvocationId == 0)
-    {
-        ++m_nextInvocationId;
-    }
-
-    m_invocationState.invocationId = m_nextInvocationId;
-
-    QVector<QString> sourceNodes;
-    QVector<QString> matchingSourceNodes;
-    bool hasDeclaredSourceTrigger = false;
-
-    for (const QString &sourceNode : allSourceNodes)
-    {
-        _tagAgentDagNode sourceDefinition;
-
-        if (!m_dagGraph.GetNode(sourceNode, sourceDefinition))
-        {
-            errorMessage = QStringLiteral("Agent runtime source node definition is missing: %1")
-                               .arg(sourceNode);
-            ClearInvocationState();
-            return false;
-        }
-
-        const QString sourceTrigger = sourceDefinition.config.value(QStringLiteral("trigger"))
-                                           .toString()
-                                           .trimmed();
-
-        if (!sourceTrigger.isEmpty())
-        {
-            hasDeclaredSourceTrigger = true;
-        }
-
-        if (!m_invocationState.trigger.isEmpty() && sourceTrigger == m_invocationState.trigger)
-        {
-            matchingSourceNodes.append(sourceNode);
-        }
-    }
-
-    if (hasDeclaredSourceTrigger && matchingSourceNodes.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime DAG has no source for trigger: %1").arg(
-                           m_invocationState.trigger);
-        ClearInvocationState();
-        return false;
-    }
-
-    sourceNodes = hasDeclaredSourceTrigger ? matchingSourceNodes : allSourceNodes;
-
-    QQueue<QString> reachableQueue;
-
-    for (const QString &sourceNode : sourceNodes)
-    {
-        reachableQueue.enqueue(sourceNode);
-    }
-
-    while (!reachableQueue.isEmpty())
-    {
-        const QString nodeId = reachableQueue.dequeue();
-
-        if (m_invocationState.activeNodeIds.contains(nodeId))
-        {
-            continue;
-        }
-
-        m_invocationState.activeNodeIds.insert(nodeId);
-        QVector<QString> successors;
-
-        if (!m_dagGraph.GetSuccessors(nodeId, successors))
-        {
-            errorMessage = QStringLiteral("Agent runtime reachable node lookup failed: %1").arg(nodeId);
-            ClearInvocationState();
-            return false;
-        }
-
-        for (const QString &successor : successors)
-        {
-            reachableQueue.enqueue(successor);
-        }
-    }
-
-    for (const QString &nodeId : nodeNames)
-    {
-        if (!m_invocationState.activeNodeIds.contains(nodeId))
-        {
-            m_invocationState.remainingInDegree.remove(nodeId);
-            continue;
-        }
-
-        QVector<QString> predecessors;
-
-        if (!m_dagGraph.GetPredecessors(nodeId, predecessors))
-        {
-            errorMessage = QStringLiteral("Agent runtime active node predecessors are missing: %1")
-                               .arg(nodeId);
-            ClearInvocationState();
-            return false;
-        }
-
-        int activeInDegree = 0;
-
-        for (const QString &predecessor : predecessors)
-        {
-            if (m_invocationState.activeNodeIds.contains(predecessor))
-            {
-                ++activeInDegree;
-            }
-        }
-
-        m_invocationState.remainingInDegree.insert(nodeId, activeInDegree);
-    }
-
-    for (const QString &sourceNode : sourceNodes)
-    {
-        _tagInvocationState::_tagBranchState branch;
-        _tagAgentDagNode sourceNodeDefinition;
-
-        if (!m_dagGraph.GetNode(sourceNode, sourceNodeDefinition))
-        {
-            errorMessage = QStringLiteral("Agent runtime source node definition is missing: %1").arg(
-                               sourceNode);
-            ClearInvocationState();
-            return false;
-        }
-
-        branch.branchId = sourceNode;
-        branch.sourceNodeId = sourceNode;
-        branch.sourceTrigger = sourceNodeDefinition.config.value(QStringLiteral("trigger"))
-                                   .toString()
-                                   .trimmed();
-        m_invocationState.branches.insert(branch.branchId, branch);
-        m_invocationState.nodeBranchIds.insert(sourceNode, branch.branchId);
-
-        if (!EnqueueReadyNode(sourceNode, errorMessage))
-        {
-            ClearInvocationState();
-            return false;
-        }
-    }
-
-    m_invocationState.isActive = true;
-    return true;
+    return m_nodeRegistry.Execute(node, context, errorMessage);
 }
 
 bool AgentRuntime::EnqueueInvocation(const AgentContext &context)
@@ -1004,7 +598,7 @@ bool AgentRuntime::EnqueueInvocation(const AgentContext &context)
 
 bool AgentRuntime::StartNextQueuedInvocation(QString &errorMessage)
 {
-    if (m_invocationState.isActive || m_invocationQueue.IsEmpty())
+    if (m_graphExecutor.IsActive() || m_invocationQueue.IsEmpty())
     {
         return true;
     }
@@ -1030,853 +624,38 @@ bool AgentRuntime::StartNextQueuedInvocation(QString &errorMessage)
         m_context.RemoveValue(removedKey);
     }
 
-    if (!BeginInvocation(errorMessage))
+    if (!m_graphExecutor.BeginInvocation(m_context,
+                                         m_asyncBridge.HasPending(),
+                                         errorMessage))
     {
         m_context = m_sessionContext.Snapshot();
         return false;
     }
 
-    if (!PumpReadyQueue(true, errorMessage))
+    if (!m_graphExecutor.PumpReadyQueue(true,
+                                        m_context,
+                                        m_sessionContext,
+                                        BuildGraphCallbacks(),
+                                        errorMessage))
     {
         return false;
     }
 
-    return true;
-}
-
-bool AgentRuntime::PumpReadyQueue(bool shouldPrepareInput, QString &errorMessage)
-{
-    if (!m_invocationState.isActive)
-    {
-        errorMessage = QStringLiteral("Agent runtime invocation is not active.");
-        return false;
-    }
-
-    if (shouldPrepareInput && !PrepareTextInputContext(m_context, errorMessage))
-    {
-        ClearInvocationState();
-        ClearInvocationInputState(m_context);
-        return false;
-    }
-
-    if (shouldPrepareInput)
-    {
-        QVector<QString> sourceNodes;
-
-        for (const QString &nodeId : m_dagGraph.GetNodeNames())
-        {
-            if (m_invocationState.activeNodeIds.contains(nodeId)
-                && m_invocationState.remainingInDegree.value(nodeId) == 0)
-            {
-                sourceNodes.append(nodeId);
-            }
-        }
-
-        for (const QString &sourceNode : sourceNodes)
-        {
-            const QString branchId = m_invocationState.nodeBranchIds.value(sourceNode);
-
-            if (!m_invocationState.branches.contains(branchId))
-            {
-                errorMessage = QStringLiteral("Agent runtime source branch is missing: %1").arg(sourceNode);
-                ResetAsyncExecutionState(m_context);
-                return false;
-            }
-
-            _tagInvocationState::_tagBranchState &branch = m_invocationState.branches[branchId];
-
-            if (!m_context.BuildDelta(m_sessionContext, branch.local, branch.removedKeys))
-            {
-                errorMessage = QStringLiteral("Agent runtime failed to initialize source branch context: %1")
-                                   .arg(sourceNode);
-                ResetAsyncExecutionState(m_context);
-                return false;
-            }
-        }
-    }
-
-    while (!m_invocationState.readyQueue.isEmpty())
-    {
-        const QString nodeId = m_invocationState.readyQueue.takeFirst();
-        _tagAgentDagNode node;
-
-        if (!m_invocationState.remainingInDegree.contains(nodeId)
-            || (m_invocationState.remainingInDegree.value(nodeId) != 0))
-        {
-            errorMessage = QStringLiteral("Agent runtime dequeued node before its dependencies completed: %1")
-                               .arg(nodeId);
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        if (m_invocationState.completedNodeIds.contains(nodeId))
-        {
-            errorMessage = QStringLiteral("Agent runtime dequeued an already completed node: %1").arg(nodeId);
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        if (!m_dagGraph.GetNode(nodeId, node))
-        {
-            errorMessage = QStringLiteral("Agent runtime node definition is missing: %1").arg(nodeId);
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        AgentContext executionContext;
-
-        if (!BuildExecutionView(nodeId, executionContext, errorMessage))
-        {
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        if (!ExecuteNode(node, executionContext, errorMessage))
-        {
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            m_invocationState.nodeExecutionResults.insert(nodeId, false);
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        if (!SaveNodeResult(nodeId, executionContext, errorMessage))
-        {
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            m_invocationState.nodeExecutionResults.insert(nodeId, false);
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-
-        m_context = executionContext.Snapshot();
-
-        QVariant pendingValue;
-
-        if (executionContext.GetValue(CONTEXT_KEY_RUNTIME_PENDING, pendingValue)
-            && pendingValue.toBool())
-        {
-            if (!RegisterPendingNode(node, executionContext, errorMessage))
-            {
-                m_invocationState.hasFailed = true;
-                m_invocationState.failureMessage = errorMessage;
-                ResetAsyncExecutionState(m_context);
-                return false;
-            }
-
-            qDebug() << "[Agent] Node is waiting for async response:" << nodeId;
-            continue;
-        }
-
-        if (!CompleteNode(nodeId, errorMessage))
-        {
-            m_invocationState.hasFailed = true;
-            m_invocationState.failureMessage = errorMessage;
-            ResetAsyncExecutionState(m_context);
-            return false;
-        }
-    }
-
-    if (!m_invocationState.pendingByRequestId.isEmpty())
-    {
-        return true;
-    }
-
-    if (m_invocationState.completedNodeIds.size() != m_invocationState.remainingInDegree.size())
-    {
-        errorMessage = QStringLiteral("Agent runtime invocation stopped before all nodes completed.");
-        m_invocationState.hasFailed = true;
-        m_invocationState.failureMessage = errorMessage;
-        ResetAsyncExecutionState(m_context);
-        return false;
-    }
-
-    if (!CommitInvocationResult(errorMessage))
-    {
-        m_invocationState.hasFailed = true;
-        m_invocationState.failureMessage = errorMessage;
-        ResetAsyncExecutionState(m_context);
-        return false;
-    }
-
-    ClearInvocationState();
-    ClearInvocationInputState(m_context);
-
-    if (!m_invocationQueue.IsEmpty())
-    {
-        QTimer::singleShot(0, this, [this]()
-        {
-            QString queuedErrorMessage;
-
-            if (!StartNextQueuedInvocation(queuedErrorMessage) && !queuedErrorMessage.isEmpty())
-            {
-                emit LogMessage(queuedErrorMessage);
-            }
-        });
-    }
-
-    qDebug() << "[Agent] Ready queue execution finished.";
-
-    return true;
-}
-
-bool AgentRuntime::CompleteNode(const QString &nodeId, QString &errorMessage)
-{
-    const QString normalizedNodeId = nodeId.trimmed();
-
-    if (normalizedNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime completed node id is empty.");
-        return false;
-    }
-
-    if (!m_invocationState.isActive)
-    {
-        errorMessage = QStringLiteral("Agent runtime cannot complete a node without an active invocation.");
-        return false;
-    }
-
-    if (!m_invocationState.remainingInDegree.contains(normalizedNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime completed node is missing from invocation: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    if (m_invocationState.completedNodeIds.contains(normalizedNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime node was completed more than once: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    QVector<QString> successors;
-
-    if (!m_dagGraph.GetSuccessors(normalizedNodeId, successors))
-    {
-        errorMessage = QStringLiteral("Agent runtime completed node is not in DAG: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    m_invocationState.completedNodeIds.insert(normalizedNodeId);
-    m_invocationState.nodeExecutionResults.insert(normalizedNodeId, true);
-
-    for (const QString &successorId : successors)
-    {
-        if (!m_invocationState.remainingInDegree.contains(successorId))
-        {
-            errorMessage = QStringLiteral("Agent runtime successor is missing from invocation: %1").arg(
-                               successorId);
-            return false;
-        }
-
-        const int remainingInDegree = m_invocationState.remainingInDegree.value(successorId);
-
-        if (remainingInDegree <= 0)
-        {
-            errorMessage = QStringLiteral("Agent runtime successor was completed more than once: %1").arg(
-                               successorId);
-            return false;
-        }
-
-        const int nextRemainingInDegree = remainingInDegree - 1;
-        m_invocationState.remainingInDegree.insert(successorId, nextRemainingInDegree);
-
-        if (nextRemainingInDegree == 0)
-        {
-            QVector<QString> predecessors;
-
-            if (!m_dagGraph.GetPredecessors(successorId, predecessors))
-            {
-                errorMessage = QStringLiteral("Agent runtime successor predecessors are missing: %1").arg(
-                                   successorId);
-                return false;
-            }
-
-            int activePredecessorCount = 0;
-
-            for (const QString &predecessor : predecessors)
-            {
-                if (m_invocationState.activeNodeIds.contains(predecessor))
-                {
-                    ++activePredecessorCount;
-                }
-            }
-
-            if (activePredecessorCount > 1)
-            {
-                if (!CreateJoinBranch(successorId, errorMessage))
-                {
-                    return false;
-                }
-            }
-            else if (!CreateChildBranch(normalizedNodeId, successorId, errorMessage))
-            {
-                return false;
-            }
-
-            if (!EnqueueReadyNode(successorId, errorMessage))
-            {
-                return false;
-            }
-        }
-    }
-
-    return true;
-}
-
-bool AgentRuntime::BuildExecutionView(const QString &nodeId,
-                                      AgentContext &context,
-                                      QString &errorMessage) const
-{
-    const QString normalizedNodeId = nodeId.trimmed();
-
-    if (normalizedNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime execution view node id is empty.");
-        return false;
-    }
-
-    const QString branchId = m_invocationState.nodeBranchIds.value(normalizedNodeId);
-
-    if (branchId.isEmpty() || !m_invocationState.branches.contains(branchId))
-    {
-        errorMessage = QStringLiteral("Agent runtime execution branch is missing: %1").arg(normalizedNodeId);
-        return false;
-    }
-
-    const _tagInvocationState::_tagBranchState &branch = m_invocationState.branches.value(branchId);
-
-    context = m_sessionContext.Snapshot();
-
-    if (!context.Overlay(branch.local))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to overlay branch local context: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    for (const QString &removedKey : branch.removedKeys)
-    {
-        context.RemoveValue(removedKey);
-    }
-
-    return true;
-}
-
-bool AgentRuntime::SaveNodeResult(const QString &nodeId,
-                                  const AgentContext &afterContext,
-                                  QString &errorMessage)
-{
-    const QString normalizedNodeId = nodeId.trimmed();
-
-    if (normalizedNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime node result id is empty.");
-        return false;
-    }
-
-    const QString branchId = m_invocationState.nodeBranchIds.value(normalizedNodeId);
-
-    if (branchId.isEmpty() || !m_invocationState.branches.contains(branchId))
-    {
-        errorMessage = QStringLiteral("Agent runtime node result branch is missing: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    _tagInvocationState::_tagBranchState &branch = m_invocationState.branches[branchId];
-
-    if (!afterContext.BuildDelta(m_sessionContext, branch.local, branch.removedKeys))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to save branch context delta: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    _tagInvocationState::_tagNodeResult result;
-
-    result.branchId = branchId;
-    result.sourceNodeId = branch.sourceNodeId;
-    result.sourceTrigger = branch.sourceTrigger;
-    result.local = branch.local.Snapshot();
-    result.removedKeys = branch.removedKeys;
-    m_invocationState.nodeResults.insert(normalizedNodeId, result);
-
-    return true;
-}
-
-bool AgentRuntime::CreateChildBranch(const QString &parentNodeId,
-                                     const QString &childNodeId,
-                                     QString &errorMessage)
-{
-    const QString normalizedParentNodeId = parentNodeId.trimmed();
-    const QString normalizedChildNodeId = childNodeId.trimmed();
-
-    if (normalizedParentNodeId.isEmpty() || normalizedChildNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime child branch node id is empty.");
-        return false;
-    }
-
-    if (m_invocationState.nodeBranchIds.contains(normalizedChildNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime child node already has a branch: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    if (!m_invocationState.nodeResults.contains(normalizedParentNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime parent node result is missing: %1").arg(
-                           normalizedParentNodeId);
-        return false;
-    }
-
-    const _tagInvocationState::_tagNodeResult parentResult =
-        m_invocationState.nodeResults.value(normalizedParentNodeId);
-    _tagInvocationState::_tagBranchState branch;
-
-    branch.branchId = normalizedChildNodeId;
-    branch.sourceNodeId = parentResult.sourceNodeId;
-    branch.sourceTrigger = parentResult.sourceTrigger;
-    branch.local = parentResult.local.Snapshot();
-    branch.removedKeys = parentResult.removedKeys;
-    m_invocationState.branches.insert(branch.branchId, branch);
-    m_invocationState.nodeBranchIds.insert(normalizedChildNodeId, branch.branchId);
-
-    return true;
-}
-
-bool AgentRuntime::CreateJoinBranch(const QString &childNodeId, QString &errorMessage)
-{
-    const QString normalizedChildNodeId = childNodeId.trimmed();
-
-    if (normalizedChildNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime join node id is empty.");
-        return false;
-    }
-
-    if (m_invocationState.nodeBranchIds.contains(normalizedChildNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime join node already has a branch: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    QVector<QString> predecessors;
-    _tagAgentDagNode joinNode;
-
-    if (!m_dagGraph.GetPredecessors(normalizedChildNodeId, predecessors)
-        || !m_dagGraph.GetNode(normalizedChildNodeId, joinNode))
-    {
-        errorMessage = QStringLiteral("Agent runtime join definition is invalid: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    QVector<QString> activePredecessors;
-
-    for (const QString &predecessor : predecessors)
-    {
-        if (m_invocationState.activeNodeIds.contains(predecessor))
-        {
-            activePredecessors.append(predecessor);
-        }
-    }
-
-    predecessors = activePredecessors;
-
-    if (predecessors.size() < 2)
-    {
-        errorMessage = QStringLiteral("Agent runtime join has fewer than two active parents: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    const QJsonValue mergeValue = joinNode.config.value(QStringLiteral("merge"));
-
-    if (!mergeValue.isUndefined() && !mergeValue.isObject())
-    {
-        errorMessage = QStringLiteral("Agent runtime join merge config must be an object: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    const QJsonObject mergeRules = mergeValue.toObject();
-    QSet<QString> candidateKeys;
-
-    for (const QString &predecessorId : predecessors)
-    {
-        if (!m_invocationState.nodeResults.contains(predecessorId))
-        {
-            errorMessage = QStringLiteral("Agent runtime join parent result is missing: %1 -> %2")
-                               .arg(predecessorId, normalizedChildNodeId);
-            return false;
-        }
-
-        const _tagInvocationState::_tagNodeResult &parentResult =
-            m_invocationState.nodeResults[predecessorId];
-
-        for (const QString &key : parentResult.local.GetKeys())
-        {
-            candidateKeys.insert(key);
-        }
-
-        candidateKeys.unite(parentResult.removedKeys);
-    }
-
-    _tagInvocationState::_tagBranchState branch;
-    branch.branchId = normalizedChildNodeId;
-
-    if (!m_invocationState.trigger.isEmpty()
-        && !branch.local.SetValue(AgentContextKeys::RUNTIME_TRIGGER_TYPE,
-                                  m_invocationState.trigger))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to restore join trigger: %1").arg(
-                           normalizedChildNodeId);
-        return false;
-    }
-
-    QStringList sortedKeys = candidateKeys.values();
-    sortedKeys.sort();
-
-    for (const QString &key : sortedKeys)
-    {
-        if (!MergeJoinKey(normalizedChildNodeId,
-                          key,
-                          predecessors,
-                          mergeRules,
-                          branch.local,
-                          branch.removedKeys,
-                          errorMessage))
-        {
-            return false;
-        }
-    }
-
-    m_invocationState.branches.insert(branch.branchId, branch);
-    m_invocationState.nodeBranchIds.insert(normalizedChildNodeId, branch.branchId);
-    return true;
-}
-
-bool AgentRuntime::MergeJoinKey(const QString &joinNodeId,
-                                const QString &key,
-                                const QVector<QString> &predecessors,
-                                const QJsonObject &mergeRules,
-                                AgentContext &local,
-                                QSet<QString> &removedKeys,
-                                QString &errorMessage)
-{
-    if (joinNodeId.trimmed().isEmpty() || key.trimmed().isEmpty() || predecessors.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime join key arguments are invalid.");
-        return false;
-    }
-
-    if (key == AgentContextKeys::EXECUTED_NODES)
-    {
-        QStringList mergedExecutedNodes;
-
-        for (const QString &predecessorId : predecessors)
-        {
-            QVariant value;
-
-            if (!m_invocationState.nodeResults[predecessorId].local.GetValue(key, value))
-            {
-                continue;
-            }
-
-            for (const QString &executedNodeId : value.toStringList())
-            {
-                if (!mergedExecutedNodes.contains(executedNodeId))
-                {
-                    mergedExecutedNodes.append(executedNodeId);
-                }
-            }
-        }
-
-        return local.SetValue(key, mergedExecutedNodes);
-    }
-
-    if (key.startsWith(QStringLiteral("runtime.")))
-    {
-        return true;
-    }
-
-    QVector<QString> candidateParents;
-    QVector<QVariant> candidateValues;
-    QVector<bool> candidateRemovals;
-
-    for (const QString &predecessorId : predecessors)
-    {
-        const _tagInvocationState::_tagNodeResult &parentResult =
-            m_invocationState.nodeResults[predecessorId];
-        QVariant value;
-
-        if (parentResult.local.GetValue(key, value))
-        {
-            candidateParents.append(predecessorId);
-            candidateValues.append(value);
-            candidateRemovals.append(false);
-        }
-        else if (parentResult.removedKeys.contains(key))
-        {
-            candidateParents.append(predecessorId);
-            candidateValues.append(QVariant());
-            candidateRemovals.append(true);
-        }
-    }
-
-    if (candidateParents.isEmpty())
-    {
-        return true;
-    }
-
-    const QString strategy = mergeRules.value(key).toString().trimmed().toLower();
-
-    if (!strategy.isEmpty()
-        && (strategy != QStringLiteral("prefer_user"))
-        && (strategy != QStringLiteral("prefer_vision"))
-        && (strategy != QStringLiteral("concat")))
-    {
-        errorMessage = QStringLiteral("Agent runtime join strategy is invalid at node %1 for key %2: %3")
-                           .arg(joinNodeId, key, strategy);
-        return false;
-    }
-
-    QVector<int> selectedIndices;
-
-    for (int candidateIndex = 0; candidateIndex < candidateParents.size(); ++candidateIndex)
-    {
-        if ((strategy == QStringLiteral("prefer_user"))
-            || (strategy == QStringLiteral("prefer_vision")))
-        {
-            const QString preferredTrigger = (strategy == QStringLiteral("prefer_user"))
-                                                 ? QStringLiteral("user")
-                                                 : QStringLiteral("vision");
-            const _tagInvocationState::_tagNodeResult &parentResult =
-                m_invocationState.nodeResults[candidateParents.at(candidateIndex)];
-
-            if (parentResult.sourceTrigger != preferredTrigger)
-            {
-                continue;
-            }
-        }
-
-        selectedIndices.append(candidateIndex);
-    }
-
-    if (selectedIndices.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime join strategy %1 found no matching parent for key %2 at node %3.")
-                           .arg(strategy, key, joinNodeId);
-        return false;
-    }
-
-    if (strategy == QStringLiteral("concat"))
-    {
-        QStringList values;
-
-        for (const int selectedIndex : selectedIndices)
-        {
-            const QVariant &value = candidateValues.at(selectedIndex);
-
-            if (candidateRemovals.at(selectedIndex)
-                || ((value.metaType().id() != QMetaType::QString)
-                    && (value.metaType().id() != QMetaType::QStringList)))
-            {
-                errorMessage = QStringLiteral("Agent runtime join concat requires string values for key %1 at node %2.")
-                                   .arg(key, joinNodeId);
-                return false;
-            }
-
-            values.append(value.metaType().id() == QMetaType::QStringList
-                              ? value.toStringList()
-                              : QStringList({value.toString()}));
-        }
-
-        return local.SetValue(key, values.join(QStringLiteral("\n")));
-    }
-
-    const int firstIndex = selectedIndices.first();
-    const bool isRemoved = candidateRemovals.at(firstIndex);
-    const QVariant selectedValue = candidateValues.at(firstIndex);
-
-    for (const int selectedIndex : selectedIndices)
-    {
-        if ((candidateRemovals.at(selectedIndex) != isRemoved)
-            || (!isRemoved && (candidateValues.at(selectedIndex) != selectedValue)))
-        {
-            errorMessage = QStringLiteral("Agent runtime join conflict at node %1 for key %2 from parents %3.")
-                               .arg(joinNodeId,
-                                    key,
-                                    candidateParents.join(QStringLiteral(", ")));
-            return false;
-        }
-    }
-
-    if (isRemoved)
-    {
-        removedKeys.insert(key);
-        return true;
-    }
-
-    return local.SetValue(key, selectedValue);
-}
-
-bool AgentRuntime::CommitInvocationResult(QString &errorMessage)
-{
-    if (m_invocationState.completedNodeIds.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime invocation completed without nodes.");
-        return false;
-    }
-
-    QString terminalNodeId;
-
-    for (const QString &nodeId : m_dagGraph.GetNodeNames())
-    {
-        if (!m_invocationState.activeNodeIds.contains(nodeId))
-        {
-            continue;
-        }
-
-        QVector<QString> successors;
-
-        if (!m_dagGraph.GetSuccessors(nodeId, successors))
-        {
-            errorMessage = QStringLiteral("Agent runtime terminal node lookup failed: %1").arg(nodeId);
-            return false;
-        }
-
-        bool hasActiveSuccessor = false;
-
-        for (const QString &successor : successors)
-        {
-            if (m_invocationState.activeNodeIds.contains(successor))
-            {
-                hasActiveSuccessor = true;
-                break;
-            }
-        }
-
-        if (!hasActiveSuccessor)
-        {
-            if (!terminalNodeId.isEmpty())
-            {
-                errorMessage = QStringLiteral(
-                                   "Agent runtime has multiple terminal branches; P3 join merging is required.");
-                return false;
-            }
-
-            terminalNodeId = nodeId;
-        }
-    }
-
-    if (terminalNodeId.isEmpty() || !m_invocationState.nodeResults.contains(terminalNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime terminal node result is missing.");
-        return false;
-    }
-
-    const _tagInvocationState::_tagNodeResult terminalResult =
-        m_invocationState.nodeResults.value(terminalNodeId);
-    QVariant historyValue;
-
-    if (terminalResult.local.GetValue(CONTEXT_KEY_CONVERSATION_HISTORY, historyValue)
-        && !m_sessionContext.SetValue(CONTEXT_KEY_CONVERSATION_HISTORY, historyValue))
-    {
-        errorMessage = QStringLiteral("Agent runtime failed to commit conversation history.");
-        return false;
-    }
-
-    if (terminalResult.removedKeys.contains(CONTEXT_KEY_CONVERSATION_HISTORY))
-    {
-        m_sessionContext.RemoveValue(CONTEXT_KEY_CONVERSATION_HISTORY);
-    }
-
-    const QStringList persistentKeys =
-    {
-        AgentContextKeys::PROACTIVE_LAST_SPOKEN_AT,
-        AgentContextKeys::PROACTIVE_LAST_SUMMARY_HASH,
-        AgentContextKeys::SEMANTIC_VISION_FRAME_HASH
-    };
-
-    for (const QString &key : persistentKeys)
-    {
-        QVariant value;
-
-        if (terminalResult.local.GetValue(key, value)
-            && !m_sessionContext.SetValue(key, value))
-        {
-            errorMessage = QStringLiteral("Agent runtime failed to commit persistent key: %1")
-                               .arg(key);
-            return false;
-        }
-    }
-
-    return BuildExecutionView(terminalNodeId, m_context, errorMessage);
-}
-
-bool AgentRuntime::EnqueueReadyNode(const QString &nodeId, QString &errorMessage)
-{
-    const QString normalizedNodeId = nodeId.trimmed();
-
-    if (normalizedNodeId.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent runtime ready node id is empty.");
-        return false;
-    }
-
-    if (!m_invocationState.nodeDeclarationOrder.contains(normalizedNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime ready node is missing from declaration order: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    if (m_invocationState.readyQueue.contains(normalizedNodeId)
-        || m_invocationState.completedNodeIds.contains(normalizedNodeId))
-    {
-        errorMessage = QStringLiteral("Agent runtime ready node was queued more than once: %1").arg(
-                           normalizedNodeId);
-        return false;
-    }
-
-    const int declarationOrder = m_invocationState.nodeDeclarationOrder.value(normalizedNodeId);
-    int insertionIndex = 0;
-
-    while ((insertionIndex < m_invocationState.readyQueue.size())
-           && (m_invocationState.nodeDeclarationOrder.value(
-                   m_invocationState.readyQueue.at(insertionIndex)) < declarationOrder))
-    {
-        ++insertionIndex;
-    }
-
-    m_invocationState.readyQueue.insert(insertionIndex, normalizedNodeId);
     return true;
 }
 
 bool AgentRuntime::RegisterPendingNode(const _tagAgentDagNode &node,
                                        const AgentContext &context,
+                                       quint64 invocationId,
+                                       const QString &branchId,
                                        QString &errorMessage)
 {
     QVariant requestIdValue;
     const QString nodeId = node.id.trimmed();
     const QString nodeType = node.type.trimmed();
 
-    if (!m_invocationState.isActive || nodeId.isEmpty() || nodeType.isEmpty()
+    if (!m_graphExecutor.IsActiveInvocation(invocationId)
+        || nodeId.isEmpty() || nodeType.isEmpty() || branchId.trimmed().isEmpty()
         || !context.GetValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID, requestIdValue))
     {
         errorMessage = QStringLiteral("Agent runtime pending node state is invalid.");
@@ -1884,16 +663,15 @@ bool AgentRuntime::RegisterPendingNode(const _tagAgentDagNode &node,
     }
 
     const int requestId = requestIdValue.toInt();
-    const QString branchId = m_invocationState.nodeBranchIds.value(nodeId);
     const QString clientType = (nodeType == NODE_TYPE_VISION_LLM)
                                    ? ASYNC_CLIENT_VISION
                                    : ASYNC_CLIENT_TEXT;
-    const QString pendingKey = BuildPendingRequestKey(clientType, requestId);
+    const QString pendingKey = m_asyncBridge.BuildRequestKey(clientType, requestId);
     const int timeoutMs = node.config.value(QStringLiteral("async_timeout_ms"))
                               .toInt(DEFAULT_ASYNC_TIMEOUT_MS);
 
     if ((requestId <= 0) || branchId.isEmpty() || pendingKey.isEmpty()
-        || m_invocationState.pendingByRequestId.contains(pendingKey)
+        || m_asyncBridge.ContainsPending(pendingKey)
         || (timeoutMs <= 0) || (timeoutMs > MAX_ASYNC_TIMEOUT_MS))
     {
         errorMessage = QStringLiteral("Agent runtime pending request is invalid, duplicated, or has an invalid timeout: %1")
@@ -1901,17 +679,21 @@ bool AgentRuntime::RegisterPendingNode(const _tagAgentDagNode &node,
         return false;
     }
 
-    _tagInvocationState::_tagPendingRequest pendingRequest;
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
     pendingRequest.requestId = requestId;
     pendingRequest.clientType = clientType;
-    pendingRequest.invocationId = m_invocationState.invocationId;
+    pendingRequest.invocationId = invocationId;
     pendingRequest.nodeId = nodeId;
     pendingRequest.branchId = branchId;
     pendingRequest.nodeType = nodeType;
     pendingRequest.context = context.Snapshot();
-    m_invocationState.pendingByRequestId.insert(pendingKey, pendingRequest);
+    if (!m_asyncBridge.AddPending(pendingKey, pendingRequest))
+    {
+        errorMessage = QStringLiteral("Agent runtime pending request is invalid, duplicated, or has an invalid timeout: %1")
+                           .arg(requestId);
+        return false;
+    }
 
-    const quint64 invocationId = m_invocationState.invocationId;
     QTimer::singleShot(timeoutMs, this, [this, pendingKey, requestId, invocationId]()
     {
         HandlePendingRequestTimeout(pendingKey, requestId, invocationId);
@@ -1920,16 +702,119 @@ bool AgentRuntime::RegisterPendingNode(const _tagAgentDagNode &node,
     return true;
 }
 
+AgentGraphExecutor::_tagCallbacks AgentRuntime::BuildGraphCallbacks()
+{
+    AgentGraphExecutor::_tagCallbacks callbacks;
+    callbacks.prepareInput = [this](AgentContext &context, QString &errorMessage)
+    {
+        return PrepareTextInputContext(context, errorMessage);
+    };
+    callbacks.executeNode = [this](const _tagAgentDagNode &node,
+                                   AgentContext &context,
+                                   QString &errorMessage)
+    {
+        return ExecuteNode(node, context, errorMessage);
+    };
+    callbacks.registerPending = [this](const _tagAgentDagNode &node,
+                                       const AgentContext &context,
+                                       quint64 invocationId,
+                                       const QString &branchId,
+                                       QString &errorMessage)
+    {
+        const bool registered = RegisterPendingNode(node,
+                                                    context,
+                                                    invocationId,
+                                                    branchId,
+                                                    errorMessage);
+
+        if (registered)
+        {
+            qDebug() << "[Agent] Node is waiting for async response:" << node.id.trimmed();
+        }
+
+        return registered;
+    };
+    callbacks.hasPending = [this]()
+    {
+        return m_asyncBridge.HasPending();
+    };
+    callbacks.clearInput = [this](AgentContext &context)
+    {
+        ClearInvocationInputState(context);
+    };
+    callbacks.resetAfterFailure = [this](AgentContext &context)
+    {
+        ResetAsyncExecutionState(context);
+    };
+    callbacks.invocationCompleted = [this](AgentContext &context)
+    {
+        // 唯一可靠的输出点：无论图以 sync 结束还是 async 节点后收尾，
+        // 都在 invocationCompleted 发射，避免自定义 DAG 静默丢回复。
+        QVariant outputValue;
+
+        if (context.GetValue(CONTEXT_KEY_OUTPUT_TEXT, outputValue))
+        {
+            const QString outputText = outputValue.toString().trimmed();
+
+            if (!outputText.isEmpty())
+            {
+                int requestId = 0;
+                QVariant requestIdValue;
+
+                if (context.GetValue(CONTEXT_KEY_LLM_LAST_REQUEST_ID, requestIdValue)
+                    && (requestIdValue.toInt() > 0))
+                {
+                    requestId = requestIdValue.toInt();
+                }
+                else if (context.GetValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID, requestIdValue)
+                         && (requestIdValue.toInt() > 0))
+                {
+                    requestId = requestIdValue.toInt();
+                }
+                else if (context.GetValue(CONTEXT_KEY_VISION_LLM_LAST_REQUEST_ID, requestIdValue)
+                         && (requestIdValue.toInt() > 0))
+                {
+                    requestId = requestIdValue.toInt();
+                }
+                else
+                {
+                    // 纯同步图可能没有任何 LLM requestId；用 invocation 序号占位，
+                    // 保证 UI 仍能收到 AgentOutputReady。
+                    requestId = static_cast<int>(m_graphExecutor.GetLastCompletedInvocationId());
+
+                    if (requestId <= 0)
+                    {
+                        requestId = 1;
+                    }
+                }
+
+                emit LlmResponseReceived(requestId, outputText);
+                EmitAgentOutputReady(requestId, outputText, context);
+            }
+        }
+
+        if (!m_invocationQueue.IsEmpty())
+        {
+            QTimer::singleShot(0, this, [this]()
+            {
+                QString queuedErrorMessage;
+
+                if (!StartNextQueuedInvocation(queuedErrorMessage)
+                    && !queuedErrorMessage.isEmpty())
+                {
+                    emit LogMessage(queuedErrorMessage);
+                }
+            });
+        }
+
+        qDebug() << "[Agent] Ready queue execution finished.";
+    };
+    return callbacks;
+}
+
 QString AgentRuntime::BuildPendingRequestKey(const QString &clientType, int requestId) const
 {
-    const QString normalizedClientType = clientType.trimmed().toLower();
-
-    if (normalizedClientType.isEmpty() || (requestId <= 0))
-    {
-        return QString();
-    }
-
-    return QStringLiteral("%1:%2").arg(normalizedClientType).arg(requestId);
+    return m_asyncBridge.BuildRequestKey(clientType, requestId);
 }
 
 bool AgentRuntime::ResumePendingNode(const QString &pendingKey,
@@ -1937,31 +822,34 @@ bool AgentRuntime::ResumePendingNode(const QString &pendingKey,
                                      const AgentContext &context,
                                      QString &errorMessage)
 {
-    if (pendingKey.trimmed().isEmpty() || (requestId <= 0) || !m_invocationState.isActive
-        || !m_invocationState.pendingByRequestId.contains(pendingKey))
+    if (pendingKey.trimmed().isEmpty() || (requestId <= 0) || !m_graphExecutor.IsActive()
+        || !m_asyncBridge.ContainsPending(pendingKey))
     {
         errorMessage = QStringLiteral("Agent runtime has no matching pending request to resume.");
         return false;
     }
 
-    const _tagInvocationState::_tagPendingRequest pendingRequest =
-        m_invocationState.pendingByRequestId.take(pendingKey);
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
 
-    if (pendingRequest.invocationId != m_invocationState.invocationId)
+    if (!m_asyncBridge.TakePending(pendingKey, pendingRequest))
+    {
+        errorMessage = QStringLiteral("Agent runtime has no matching pending request to resume.");
+        return false;
+    }
+
+    if (!m_graphExecutor.IsActiveInvocation(pendingRequest.invocationId))
     {
         errorMessage = QStringLiteral("Agent runtime pending request belongs to an old invocation.");
         return false;
     }
 
-    m_context = context.Snapshot();
-
-    if (!SaveNodeResult(pendingRequest.nodeId, context, errorMessage)
-        || !CompleteNode(pendingRequest.nodeId, errorMessage))
-    {
-        return false;
-    }
-
-    return PumpReadyQueue(false, errorMessage);
+    return m_graphExecutor.ResumePendingNode(pendingRequest.nodeId,
+                                             pendingRequest.invocationId,
+                                             context,
+                                             m_context,
+                                             m_sessionContext,
+                                             BuildGraphCallbacks(),
+                                             errorMessage);
 }
 
 void AgentRuntime::HandlePendingRequestTimeout(const QString &pendingKey,
@@ -1969,9 +857,8 @@ void AgentRuntime::HandlePendingRequestTimeout(const QString &pendingKey,
                                                quint64 invocationId)
 {
     if (pendingKey.trimmed().isEmpty() || (requestId <= 0) || (invocationId == 0)
-        || !m_invocationState.isActive
-        || (m_invocationState.invocationId != invocationId)
-        || !m_invocationState.pendingByRequestId.contains(pendingKey))
+        || !m_graphExecutor.IsActiveInvocation(invocationId)
+        || !m_asyncBridge.ContainsPending(pendingKey))
     {
         return;
     }
@@ -1980,25 +867,6 @@ void AgentRuntime::HandlePendingRequestTimeout(const QString &pendingKey,
     const QString message = QStringLiteral("Agent async request timed out.");
     emit LogMessage(QStringLiteral("%1 Request ID: %2").arg(message).arg(requestId));
     emit LlmRequestFailed(requestId, message, 0);
-}
-
-void AgentRuntime::ClearInvocationState()
-{
-    m_invocationState.isActive = false;
-    m_invocationState.hasFailed = false;
-    m_invocationState.invocationId = 0;
-    m_invocationState.trigger.clear();
-    m_invocationState.failureMessage.clear();
-    m_invocationState.remainingInDegree.clear();
-    m_invocationState.nodeDeclarationOrder.clear();
-    m_invocationState.readyQueue.clear();
-    m_invocationState.completedNodeIds.clear();
-    m_invocationState.nodeExecutionResults.clear();
-    m_invocationState.branches.clear();
-    m_invocationState.nodeBranchIds.clear();
-    m_invocationState.nodeResults.clear();
-    m_invocationState.pendingByRequestId.clear();
-    m_invocationState.activeNodeIds.clear();
 }
 
 bool AgentRuntime::PrepareTextInputContext(AgentContext &context, QString &errorMessage)
@@ -2488,6 +1356,14 @@ QString AgentRuntime::ReadOutputSource(const AgentContext &context) const
 
     if (!context.GetValue(CONTEXT_KEY_SEMANTIC_OUTPUT_SOURCE, outputSourceValue))
     {
+        QVariant triggerTypeValue;
+
+        if (context.GetValue(CONTEXT_KEY_RUNTIME_TRIGGER_TYPE, triggerTypeValue)
+            && (triggerTypeValue.toString().trimmed() == TRIGGER_TYPE_VISION))
+        {
+            return OUTPUT_SOURCE_VISION_PROACTIVE;
+        }
+
         return OUTPUT_SOURCE_USER_RESPONSE;
     }
 
@@ -2501,7 +1377,9 @@ QString AgentRuntime::ReadOutputSource(const AgentContext &context) const
     return OUTPUT_SOURCE_USER_RESPONSE;
 }
 
-void AgentRuntime::EmitAgentOutputReady(int requestId, const QString &content)
+void AgentRuntime::EmitAgentOutputReady(int requestId,
+                                        const QString &content,
+                                        const AgentContext &context)
 {
     if (requestId <= 0)
     {
@@ -2517,7 +1395,7 @@ void AgentRuntime::EmitAgentOutputReady(int requestId, const QString &content)
         return;
     }
 
-    const QString outputSource = ReadOutputSource(m_context);
+    const QString outputSource = ReadOutputSource(context);
     emit AgentOutputReady(requestId, normalizedContent, outputSource);
 }
 
@@ -2565,10 +1443,7 @@ bool AgentRuntime::AppendConversationHistory(AgentContext &context,
 
 void AgentRuntime::ClearAsyncPendingState(AgentContext &context)
 {
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_ID);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_TYPE);
-    context.RemoveValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID);
+    m_asyncBridge.ClearContextProtocol(context);
 }
 
 void AgentRuntime::ResetAsyncExecutionState(AgentContext &context)
@@ -2577,7 +1452,8 @@ void AgentRuntime::ResetAsyncExecutionState(AgentContext &context)
     context.SetValue(CONTEXT_KEY_VISION_LLM_PENDING, false);
     ClearAsyncPendingState(context);
     ClearInvocationInputState(context);
-    ClearInvocationState();
+    m_graphExecutor.ClearInvocationState();
+    m_asyncBridge.ClearPending();
     context = m_sessionContext.Snapshot();
 
     if (!m_invocationQueue.IsEmpty())
@@ -2599,46 +1475,11 @@ bool AgentRuntime::SetAsyncPendingState(const _tagAgentDagNode &node,
                                         int requestId,
                                         QString &errorMessage)
 {
-    const QString nodeId = node.id.trimmed();
-    const QString nodeType = node.type.trimmed();
-
-    if (nodeId.isEmpty() || nodeType.isEmpty())
-    {
-        errorMessage = QStringLiteral("Agent async pending node is invalid.");
-        return false;
-    }
-
-    if (requestId <= 0)
-    {
-        errorMessage = QStringLiteral("Agent async pending request ID is invalid.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING, true))
-    {
-        errorMessage = QStringLiteral("Agent failed to record async pending state.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_ID, nodeId))
-    {
-        errorMessage = QStringLiteral("Agent failed to record async pending node id.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_NODE_TYPE, nodeType))
-    {
-        errorMessage = QStringLiteral("Agent failed to record async pending node type.");
-        return false;
-    }
-
-    if (!context.SetValue(CONTEXT_KEY_RUNTIME_PENDING_REQUEST_ID, requestId))
-    {
-        errorMessage = QStringLiteral("Agent failed to record async pending request ID.");
-        return false;
-    }
-
-    return true;
+    return m_asyncBridge.SetContextProtocol(node.id,
+                                            node.type,
+                                            requestId,
+                                            context,
+                                            errorMessage);
 }
 
 bool AgentRuntime::ExecutePassThroughNode(const _tagAgentDagNode &node,
@@ -2811,7 +1652,7 @@ bool AgentRuntime::SendUserInputToLlm(const QString &userInput, QString &errorMe
         return false;
     }
 
-    m_directRequestIds.insert(requestId);
+    m_asyncBridge.AddDirectRequest(requestId);
 
     emit LogMessage(QStringLiteral("Agent LLM request sent: %1").arg(requestId));
 
@@ -2826,7 +1667,7 @@ void AgentRuntime::OnLlmChatCompleted(int requestId, const QString &content)
         return;
     }
 
-    if (m_directRequestIds.remove(requestId) > 0)
+    if (m_asyncBridge.TakeDirectRequest(requestId))
     {
         if (content.trimmed().isEmpty())
         {
@@ -2842,20 +1683,25 @@ void AgentRuntime::OnLlmChatCompleted(int requestId, const QString &content)
         ClearAsyncPendingState(m_context);
         ClearInvocationInputState(m_context);
         emit LlmResponseReceived(requestId, content);
-        EmitAgentOutputReady(requestId, content);
+        EmitAgentOutputReady(requestId, content, m_context);
         return;
     }
 
     const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_TEXT, requestId);
 
-    if (pendingKey.isEmpty() || !m_invocationState.pendingByRequestId.contains(pendingKey))
+    if (pendingKey.isEmpty() || !m_asyncBridge.ContainsPending(pendingKey))
     {
         emit LogMessage(QStringLiteral("Agent LLM response ignored because request ID is unknown."));
         return;
     }
 
-    const _tagInvocationState::_tagPendingRequest pendingRequest =
-        m_invocationState.pendingByRequestId.value(pendingKey);
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
+
+    if (!m_asyncBridge.GetPending(pendingKey, pendingRequest))
+    {
+        emit LogMessage(QStringLiteral("Agent LLM response ignored because request ID is unknown."));
+        return;
+    }
     AgentContext callbackContext = pendingRequest.context.Snapshot();
     QString errorMessage;
 
@@ -2884,6 +1730,7 @@ void AgentRuntime::OnLlmChatCompleted(int requestId, const QString &content)
         }
     }
     else if (!callbackContext.SetValue(AgentContextKeys::LLM_LAST_RESPONSE, content)
+             || !callbackContext.SetValue(CONTEXT_KEY_LLM_LAST_REQUEST_ID, requestId)
              || !callbackContext.SetValue(CONTEXT_KEY_SEMANTIC_TEXT_RESPONSE, content)
              || !callbackContext.SetValue(CONTEXT_KEY_NODE_OUTPUT_TEXT_RESPONSE, content))
     {
@@ -2902,20 +1749,12 @@ void AgentRuntime::OnLlmChatCompleted(int requestId, const QString &content)
         return;
     }
 
-    QVariant outputValue;
-
-    if (!m_invocationState.isActive
-        && m_context.GetValue(CONTEXT_KEY_OUTPUT_TEXT, outputValue))
-    {
-        const QString outputText = outputValue.toString();
-        emit LlmResponseReceived(requestId, outputText);
-        EmitAgentOutputReady(requestId, outputText);
-    }
+    // AgentOutputReady 由 invocationCompleted 统一发射，避免重复或漏发。
 }
 
 void AgentRuntime::OnLlmChatFailed(int requestId, const QString &message, int statusCode)
 {
-    if (m_directRequestIds.remove(requestId) > 0)
+    if (m_asyncBridge.TakeDirectRequest(requestId))
     {
         emit LlmRequestFailed(requestId, message, statusCode);
         return;
@@ -2923,7 +1762,7 @@ void AgentRuntime::OnLlmChatFailed(int requestId, const QString &message, int st
 
     const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_TEXT, requestId);
 
-    if (pendingKey.isEmpty() || !m_invocationState.pendingByRequestId.contains(pendingKey))
+    if (pendingKey.isEmpty() || !m_asyncBridge.ContainsPending(pendingKey))
     {
         emit LogMessage(QStringLiteral("Agent LLM failure ignored because request ID is unknown."));
         return;
@@ -2937,7 +1776,7 @@ void AgentRuntime::OnVisionAnalysisCompleted(int requestId, const QString &conte
 {
     const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_VISION, requestId);
 
-    if (pendingKey.isEmpty() || !m_invocationState.pendingByRequestId.contains(pendingKey))
+    if (pendingKey.isEmpty() || !m_asyncBridge.ContainsPending(pendingKey))
     {
         emit LogMessage(QStringLiteral(
                             "Agent Vision LLM response ignored because pending state does not match."));
@@ -2954,8 +1793,14 @@ void AgentRuntime::OnVisionAnalysisCompleted(int requestId, const QString &conte
         return;
     }
 
-    const _tagInvocationState::_tagPendingRequest pendingRequest =
-        m_invocationState.pendingByRequestId.value(pendingKey);
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
+
+    if (!m_asyncBridge.GetPending(pendingKey, pendingRequest))
+    {
+        emit LogMessage(QStringLiteral(
+                            "Agent Vision LLM response ignored because pending state does not match."));
+        return;
+    }
 
     if (pendingRequest.nodeType != NODE_TYPE_VISION_LLM)
     {
@@ -3017,7 +1862,7 @@ void AgentRuntime::OnVisionAnalysisFailed(int requestId, const QString &message,
 
     const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_VISION, requestId);
 
-    if (pendingKey.isEmpty() || !m_invocationState.pendingByRequestId.contains(pendingKey))
+    if (pendingKey.isEmpty() || !m_asyncBridge.ContainsPending(pendingKey))
     {
         emit LogMessage(QStringLiteral(
                             "Agent Vision LLM failure ignored because request ID does not match pending node."));

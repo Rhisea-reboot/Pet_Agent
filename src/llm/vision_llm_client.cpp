@@ -355,10 +355,10 @@ void VisionLlmClient::OnReplyFinished(QNetworkReply *reply)
     const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QByteArray responseData = reply->readAll();
 
-    qDebug().noquote() << QStringLiteral("[VisionLLM] Full response JSON, request: %1 status: %2 body: %3")
+    qDebug().noquote() << QStringLiteral("[VisionLLM] Response received, request: %1 status: %2 bytes: %3")
                           .arg(requestId)
                           .arg(statusCode)
-                          .arg(QString::fromUtf8(responseData));
+                          .arg(responseData.size());
 
     if (requestId <= 0)
     {
@@ -378,8 +378,8 @@ void VisionLlmClient::OnReplyFinished(QNetworkReply *reply)
 
     if ((statusCode < 200) || (statusCode >= 300))
     {
-        const QString message = QStringLiteral("Vision LLM HTTP error: %1").arg(
-                                    QString::fromUtf8(responseData));
+        const QString message = QStringLiteral("Vision LLM HTTP error. Response bytes: %1.")
+                                .arg(responseData.size());
         emit AnalysisFailed(requestId, message, statusCode);
         return;
     }
@@ -575,10 +575,17 @@ QString VisionLlmClient::ExtractMessageText(const QJsonObject &message,
 
     if (profile == VISION_LLM_MODEL_PROFILE::MIMO_V2_5)
     {
-        return message.value(QStringLiteral("reasoning_content")).toString();
+        const QString content = message.value(QStringLiteral("content")).toString().trimmed();
+
+        if (!content.isEmpty())
+        {
+            return content;
+        }
+
+        return message.value(QStringLiteral("reasoning_content")).toString().trimmed();
     }
 
-    return message.value(QStringLiteral("content")).toString();
+    return message.value(QStringLiteral("content")).toString().trimmed();
 }
 
 bool VisionLlmClient::BuildImageDataUrl(const QByteArray &base64Image,

@@ -11,7 +11,6 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcessEnvironment>
-#include <QThread>
 
 namespace vpet
 {
@@ -94,38 +93,6 @@ bool TtsServerManager::Start(const QString &configPath)
         return false;
     }
 
-    emit StatusChanged(QStringLiteral("正在清理旧 TTS 进程..."));
-
-    // 精准杀掉占用 9880 端口的残留进程
-    // 使用 PowerShell 避免 cmd findstr 转义问题
-    {
-        QProcess cleanupProcess;
-
-        const QString psCommand = QStringLiteral(
-            "Get-NetTCPConnection -LocalPort %1 -ErrorAction SilentlyContinue | "
-            "Select-Object -ExpandProperty OwningProcess | "
-            "ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }")
-            .arg(9880);
-
-        cleanupProcess.start(QStringLiteral("powershell.exe"),
-                             QStringList() << QStringLiteral("-NoProfile")
-                             << QStringLiteral("-Command") << psCommand);
-
-        cleanupProcess.waitForFinished(8000);
-
-        qDebug() << "[TTS]   port 9880 cleanup done, exitCode:"
-                 << cleanupProcess.exitCode();
-
-        if (cleanupProcess.exitCode() != 0)
-        {
-            qDebug() << "[TTS]   cleanup stderr:"
-                     << QString::fromUtf8(cleanupProcess.readAllStandardError());
-        }
-    }
-
-    // 等待端口释放
-    QThread::msleep(500);
-
     emit StatusChanged(QStringLiteral("正在启动 TTS 服务..."));
 
     // 启动 GPT-SoVITS 进程
@@ -172,6 +139,13 @@ bool TtsServerManager::Start(const QString &configPath)
     if (!m_serverProcess->waitForStarted(5000))
     {
         qDebug() << "[TTS]   FAILED - process failed to start";
+
+        if (m_serverProcess != nullptr)
+        {
+            m_serverProcess->deleteLater();
+            m_serverProcess = nullptr;
+        }
+
         emit ServerStartFailed(QStringLiteral("TTS 服务进程启动失败"));
         return false;
     }
@@ -204,13 +178,20 @@ bool TtsServerManager::Start(const QString &configPath)
 
 void TtsServerManager::Stop()
 {
+    m_isReady = false;
+
     if (m_healthCheckTimer != nullptr)
     {
         m_healthCheckTimer->stop();
+        m_healthCheckTimer->deleteLater();
+        m_healthCheckTimer = nullptr;
     }
 
     if (m_serverProcess != nullptr)
     {
+        // 主动停止期间不执行意外退出处理，只管理当前对象启动的进程。
+        m_serverProcess->disconnect(this);
+
         if (m_serverProcess->state() != QProcess::NotRunning)
         {
             m_serverProcess->terminate();
@@ -225,8 +206,6 @@ void TtsServerManager::Stop()
         delete m_serverProcess;
         m_serverProcess = nullptr;
     }
-
-    m_isReady = false;
 }
 
 bool TtsServerManager::IsReady() const
@@ -263,10 +242,14 @@ void TtsServerManager::OnHealthCheckTimer()
     if (m_healthCheckCount >= HEALTH_CHECK_TIMEOUT_COUNT)
     {
         qDebug() << "[TTS]   health check TIMEOUT after" << m_healthCheckCount << "attempts";
-        m_healthCheckTimer->stop();
+        const QString failureMessage = QStringLiteral(
+                                           "TTS 服务启动超时（约 %1 秒），请检查服务是否正常")
+                                       .arg((HEALTH_CHECK_TIMEOUT_COUNT
+                                             * HEALTH_CHECK_INTERVAL_MS) / 1000);
+
+        Stop();
         emit ServerStartFailed(
-            QStringLiteral("TTS 服务启动超时（约 %1 秒），请检查服务是否正常")
-                .arg((HEALTH_CHECK_TIMEOUT_COUNT * HEALTH_CHECK_INTERVAL_MS) / 1000));
+            failureMessage);
         return;
     }
 
@@ -277,13 +260,24 @@ void TtsServerManager::OnProcessError(QProcess::ProcessError error)
 {
     qDebug() << "[TTS] OnProcessError:" << error;
 
+    const QString errorMsg = m_serverProcess != nullptr
+                                 ? m_serverProcess->errorString()
+                                 : QStringLiteral("未知进程错误");
+    qDebug() << "[TTS]   process error string:" << errorMsg;
+
+    // 崩溃等终止错误由 finished 统一收口，避免重复报告并保留 Ready 前状态。
+    if (error != QProcess::FailedToStart)
+    {
+        return;
+    }
+
+    m_isReady = false;
+
     if (m_healthCheckTimer != nullptr)
     {
         m_healthCheckTimer->stop();
     }
 
-    const QString errorMsg = m_serverProcess->errorString();
-    qDebug() << "[TTS]   process error string:" << errorMsg;
     emit ServerStartFailed(
         QStringLiteral("TTS 服务进程错误: %1").arg(errorMsg));
 }
@@ -293,20 +287,31 @@ void TtsServerManager::OnProcessFinished(int exitCode,
 {
     qDebug() << "[TTS] OnProcessFinished, exitCode:" << exitCode << "exitStatus:" << exitStatus;
 
-    // 仅在服务器尚未就绪时报告退出
-    if (!m_isReady)
+    const bool wasReady = m_isReady;
+    m_isReady = false;
+
+    if (m_healthCheckTimer != nullptr)
     {
-        if (m_healthCheckTimer != nullptr)
-        {
-            m_healthCheckTimer->stop();
-        }
-
-        const QByteArray stderrOutput = m_serverProcess->readAllStandardError();
-        qDebug() << "[TTS]   stderr:" << QString::fromUtf8(stderrOutput);
-
-        emit ServerStartFailed(
-            QStringLiteral("TTS 服务进程意外退出，退出码: %1").arg(exitCode));
+        m_healthCheckTimer->stop();
+        m_healthCheckTimer->deleteLater();
+        m_healthCheckTimer = nullptr;
     }
+
+    if (m_serverProcess != nullptr)
+    {
+        const QByteArray stderrOutput = m_serverProcess->readAllStandardError();
+        qDebug() << "[TTS]   stderr bytes:" << stderrOutput.size();
+
+        m_serverProcess->deleteLater();
+        m_serverProcess = nullptr;
+    }
+
+    const QString failureMessage = wasReady
+                                       ? QStringLiteral("TTS 服务就绪后意外退出，退出码: %1").arg(exitCode)
+                                       : QStringLiteral("TTS 服务进程意外退出，退出码: %1").arg(exitCode);
+
+    emit StatusChanged(failureMessage);
+    emit ServerStartFailed(failureMessage);
 }
 
 bool TtsServerManager::LoadServerConfig(const QString &configPath)
@@ -430,6 +435,12 @@ void TtsServerManager::PerformHealthCheck()
 
         if (reply->error() == QNetworkReply::NoError)
         {
+            if ((m_serverProcess == nullptr)
+                || (m_serverProcess->state() == QProcess::NotRunning))
+            {
+                return;
+            }
+
             qDebug() << "[TTS]   health check PASSED, HTTP" << statusCode;
 
             if (m_healthCheckTimer != nullptr)

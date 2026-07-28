@@ -105,6 +105,7 @@ private slots:
     void StartsQueuedInvocationAfterFailure();
     void UsesLatestSessionHistoryForQueuedVisionInvocation();
     void ExecutesDefaultSingleChainWithUserInput();
+    void EmitsOutputForSynchronousTerminalGraph();
     void ResumesAsyncNodeAndRunsSuccessors();
     void ResumesTwoAsyncBranchesOutOfOrder();
     void IsolatesSameRequestIdAcrossClients();
@@ -1195,9 +1196,61 @@ void AgentRuntimeSchedulerTest::ExecutesDefaultSingleChainWithUserInput()
     QVERIFY(!runtime.HasPendingAsyncRequest());
     QVERIFY(!runtime.GetContext().Contains(vpet::AgentContextKeys::USER_INPUT));
     QVERIFY(!runtime.GetContext().Contains(vpet::AgentContextKeys::RUNTIME_TRIGGER_TYPE));
-    QCOMPARE(outputRequestId, -1);
-    QVERIFY(outputContent.isEmpty());
-    QVERIFY(outputSource.isEmpty());
+    QCOMPARE(outputRequestId, 1);
+    QCOMPARE(outputContent, QStringLiteral("emotion reply"));
+    QCOMPARE(outputSource, QStringLiteral("user_response"));
+}
+
+void AgentRuntimeSchedulerTest::EmitsOutputForSynchronousTerminalGraph()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"terminal","type":"sync_terminal"}],"edges":[]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    vpet::AgentRuntime runtime;
+    QString errorMessage;
+    QString outputContent;
+    QString outputSource;
+    int outputRequestId = -1;
+
+    QObject::connect(&runtime,
+                     &vpet::AgentRuntime::AgentOutputReady,
+                     [&outputRequestId, &outputContent, &outputSource](int requestId,
+                                                                       const QString &content,
+                                                                       const QString &source)
+    {
+        outputRequestId = requestId;
+        outputContent = content;
+        outputSource = source;
+    });
+
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sync_terminal"),
+                                        [](const vpet::_tagAgentDagNode &,
+                                           vpet::AgentContext &context,
+                                           QString &)
+    {
+        return context.SetValue(vpet::AgentContextKeys::OUTPUT_TEXT,
+                                QStringLiteral("sync reply"))
+               && context.SetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_FINAL,
+                                   QStringLiteral("sync reply"));
+    }));
+
+    QVERIFY2(runtime.Load(configPath, errorMessage), qPrintable(errorMessage));
+    QVERIFY2(runtime.UpdatePerceptionFrame(QByteArrayLiteral("image"),
+                                           1,
+                                           QSize(10, 10),
+                                           QStringLiteral("image/png"),
+                                           errorMessage),
+             qPrintable(errorMessage));
+    QVERIFY2(runtime.Execute(errorMessage), qPrintable(errorMessage));
+
+    QCOMPARE(outputRequestId, 1);
+    QCOMPARE(outputContent, QStringLiteral("sync reply"));
+    QCOMPARE(outputSource, QStringLiteral("vision_proactive"));
 }
 
 void AgentRuntimeSchedulerTest::ResumesAsyncNodeAndRunsSuccessors()

@@ -207,6 +207,17 @@ private:
     void ShowPetContextMenu(const QPoint &globalPosition);
 
     /**
+     * @brief 切换屏幕感知（截图）开关
+     * @param[in] enabled 是否启用
+     */
+    void SetScreenPerceptionEnabled(bool enabled);
+
+    /**
+     * @brief 更新屏幕感知状态指示器
+     */
+    void UpdatePerceptionIndicator();
+
+    /**
      * @brief 切换语音录制状态
      */
     void ToggleVoiceRecording();
@@ -243,12 +254,15 @@ private:
     PetController *m_controller;          ///< 宠物控制器
     QLabel *m_imageLabel;                 ///< 帧显示标签
     QLabel *m_bubbleLabel;                ///< 气泡标签
+    QLabel *m_perceptionIndicatorLabel;   ///< 屏幕感知开启时的红色指示点
     ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
     PerceptionPipeline *m_perceptionPipeline; ///< 视觉感知管道
     VoiceInputManager *m_voiceInputManager; ///< 按键语音输入管理器
     AgentRuntime *m_agentRuntime;          ///< Agent 运行时对象，不持有所有权
     QSize m_currentImageSize;             ///< 当前图片尺寸
+    QString m_lastFramePath;              ///< 最近一次已加载的帧路径（避免重复磁盘 I/O）
     bool m_isVoiceHotkeyRegistered;        ///< 系统全局语音热键是否已注册
+    bool m_isScreenPerceptionEnabled;      ///< 屏幕感知（截图上传）是否开启，默认关闭
 };
 
 } // namespace vpet

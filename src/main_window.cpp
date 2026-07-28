@@ -13,6 +13,7 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QMenu>
+#include <QPixmapCache>
 #include <QScreen>
 
 #ifdef Q_OS_WIN
@@ -38,12 +39,15 @@ MainWindow::MainWindow(QWidget *parent)
     , m_controller(nullptr)
     , m_imageLabel(nullptr)
     , m_bubbleLabel(nullptr)
+    , m_perceptionIndicatorLabel(nullptr)
     , m_chatBubbleWindow(nullptr)
     , m_perceptionPipeline(nullptr)
     , m_voiceInputManager(nullptr)
     , m_agentRuntime(nullptr)
     , m_currentImageSize()
+    , m_lastFramePath()
     , m_isVoiceHotkeyRegistered(false)
+    , m_isScreenPerceptionEnabled(false)
 {
     setWindowFlags(Qt::FramelessWindowHint
                    | Qt::WindowStaysOnTopHint
@@ -61,6 +65,15 @@ MainWindow::MainWindow(QWidget *parent)
         QStringLiteral("QLabel { background-color: white; color: black; "
                        "border: 1px solid gray; border-radius: 8px; "
                        "padding: 6px 10px; font-size: 12px; }"));
+
+    m_perceptionIndicatorLabel = new QLabel(this);
+    m_perceptionIndicatorLabel->setFixedSize(10, 10);
+    m_perceptionIndicatorLabel->setStyleSheet(
+        QStringLiteral("QLabel { background-color: #E53935; border-radius: 5px; "
+                       "border: 1px solid #B71C1C; }"));
+    m_perceptionIndicatorLabel->setToolTip(
+        QStringLiteral("屏幕感知已开启：正在周期性截图并发送到外部 API"));
+    m_perceptionIndicatorLabel->setVisible(false);
 }
 
 MainWindow::~MainWindow()
@@ -116,7 +129,8 @@ bool MainWindow::Initialize(const QString &animationBasePath)
     });
     connect(m_voiceInputManager, &VoiceInputManager::RecordingStopped, this, [](const QString &audioPath)
     {
-        qDebug() << "[VoiceInput] Recording stopped:" << audioPath;
+        qDebug() << "[VoiceInput] Recording stopped, path available:"
+                 << !audioPath.isEmpty();
     });
     connect(m_voiceInputManager, &VoiceInputManager::TranscriptionCompleted,
             this, &MainWindow::OnVoiceTranscriptionCompleted);
@@ -144,10 +158,9 @@ bool MainWindow::Initialize(const QString &animationBasePath)
     connect(m_perceptionPipeline, &PerceptionPipeline::ErrorOccurred,
             this, &MainWindow::OnPerceptionError);
 
-    if (!m_perceptionPipeline->Start())
-    {
-        qWarning() << "[Vision] Perception pipeline failed to start.";
-    }
+    // 默认不启动截图管道：需用户通过右键菜单主动开启（隐私 Opt-in）。
+    m_isScreenPerceptionEnabled = false;
+    UpdatePerceptionIndicator();
 
     CenterOnScreen();
 
@@ -313,17 +326,39 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
 
 void MainWindow::OnFrameChanged(const QString &framePath)
 {
-    const QPixmap originalPixmap(framePath);
-
-    if (originalPixmap.isNull())
+    if (framePath.isEmpty())
     {
         return;
     }
 
-    const bool isFirstFrame = !m_currentImageSize.isValid();
-    const QPixmap displayPixmap = originalPixmap.scaledToWidth(
-        TARGET_DISPLAY_WIDTH, Qt::SmoothTransformation);
+    if ((framePath == m_lastFramePath) && m_currentImageSize.isValid())
+    {
+        return;
+    }
 
+    const QString cacheKey = QStringLiteral("vpet_frame_%1_%2")
+                                 .arg(TARGET_DISPLAY_WIDTH)
+                                 .arg(framePath);
+
+    QPixmap displayPixmap;
+
+    if (!QPixmapCache::find(cacheKey, &displayPixmap))
+    {
+        const QPixmap originalPixmap(framePath);
+
+        if (originalPixmap.isNull())
+        {
+            return;
+        }
+
+        displayPixmap = originalPixmap.scaledToWidth(
+            TARGET_DISPLAY_WIDTH, Qt::SmoothTransformation);
+        QPixmapCache::insert(cacheKey, displayPixmap);
+    }
+
+    const bool isFirstFrame = !m_currentImageSize.isValid();
+
+    m_lastFramePath = framePath;
     m_currentImageSize = displayPixmap.size();
     m_imageLabel->setPixmap(displayPixmap);
     m_imageLabel->resize(m_currentImageSize);
@@ -334,6 +369,11 @@ void MainWindow::OnFrameChanged(const QString &framePath)
     }
 
     UpdateHitRegions(m_currentImageSize);
+
+    if (m_perceptionIndicatorLabel != nullptr)
+    {
+        m_perceptionIndicatorLabel->move(m_currentImageSize.width() - 14, 2);
+    }
 
     resize(m_currentImageSize);
     update();
@@ -508,8 +548,7 @@ void MainWindow::OnVoiceTranscriptionCompleted(const QString &text)
         return;
     }
 
-    qDebug() << "[VoiceInput] Transcription completed:";
-    qDebug().noquote() << text;
+    qDebug() << "[VoiceInput] Transcription completed, characters:" << text.size();
     SubmitTextToAgent(text);
 }
 
@@ -548,8 +587,8 @@ void MainWindow::OnAgentLlmResponseReceived(int requestId, const QString &conten
         return;
     }
 
-    qDebug() << "[AgentLLM] Voice response, request:" << requestId;
-    qDebug().noquote() << content;
+    qDebug() << "[AgentLLM] Voice response, request:" << requestId
+             << "characters:" << content.size();
 }
 
 void MainWindow::OnAgentOutputReady(int requestId, const QString &content, const QString &source)
@@ -575,8 +614,8 @@ void MainWindow::OnAgentOutputReady(int requestId, const QString &content, const
         : SaySource::UserResponse;
 
     qDebug() << "[AgentOutput] Final output ready, request:" << requestId
-             << "source:" << normalizedSource;
-    qDebug().noquote() << normalizedContent;
+             << "source:" << normalizedSource
+             << "characters:" << normalizedContent.size();
 
     if (m_controller != nullptr)
     {
@@ -617,6 +656,20 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
         connect(voiceInputAction, &QAction::triggered, this, &MainWindow::ToggleVoiceRecording);
     }
 
+    menu.addSeparator();
+
+    QAction *screenPerceptionAction = menu.addAction(QStringLiteral("屏幕感知（截图）"));
+
+    if (screenPerceptionAction != nullptr)
+    {
+        screenPerceptionAction->setCheckable(true);
+        screenPerceptionAction->setChecked(m_isScreenPerceptionEnabled);
+        connect(screenPerceptionAction, &QAction::toggled, this, [this](bool checked)
+        {
+            SetScreenPerceptionEnabled(checked);
+        });
+    }
+
     if ((m_agentRuntime != nullptr) && m_agentRuntime->IsVisionLlmConfigured())
     {
         menu.addSeparator();
@@ -625,8 +678,10 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
 
         if (visionModelMenu != nullptr)
         {
-            QActionGroup modelActionGroup(&menu);
-            modelActionGroup.setExclusive(true);
+            // QActionGroup 必须 heap 分配并挂到 menu，否则 menu.exec 前栈对象已析构，
+            // 互斥勾选会失效。
+            QActionGroup *modelActionGroup = new QActionGroup(&menu);
+            modelActionGroup->setExclusive(true);
 
             QAction *mimoAction = visionModelMenu->addAction(QStringLiteral("mimo-v2.5"));
             QAction *gptAction = visionModelMenu->addAction(QStringLiteral("gpt"));
@@ -635,8 +690,8 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
             {
                 mimoAction->setCheckable(true);
                 gptAction->setCheckable(true);
-                modelActionGroup.addAction(mimoAction);
-                modelActionGroup.addAction(gptAction);
+                modelActionGroup->addAction(mimoAction);
+                modelActionGroup->addAction(gptAction);
 
                 const VISION_LLM_MODEL_PROFILE activeProfile =
                     m_agentRuntime->GetActiveVisionLlmProfile();
@@ -667,6 +722,61 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
     }
 
     menu.exec(globalPosition);
+}
+
+void MainWindow::SetScreenPerceptionEnabled(bool enabled)
+{
+    if (m_perceptionPipeline == nullptr)
+    {
+        qWarning() << "[Vision] Perception pipeline is not available.";
+        m_isScreenPerceptionEnabled = false;
+        UpdatePerceptionIndicator();
+        return;
+    }
+
+    if (enabled == m_isScreenPerceptionEnabled)
+    {
+        UpdatePerceptionIndicator();
+        return;
+    }
+
+    if (enabled)
+    {
+        if (!m_perceptionPipeline->Start())
+        {
+            qWarning() << "[Vision] Perception pipeline failed to start.";
+            m_isScreenPerceptionEnabled = false;
+            UpdatePerceptionIndicator();
+            return;
+        }
+
+        m_isScreenPerceptionEnabled = true;
+        qDebug() << "[Vision] Screen perception enabled by user.";
+    }
+    else
+    {
+        m_perceptionPipeline->Stop();
+        m_isScreenPerceptionEnabled = false;
+        qDebug() << "[Vision] Screen perception disabled by user.";
+    }
+
+    UpdatePerceptionIndicator();
+}
+
+void MainWindow::UpdatePerceptionIndicator()
+{
+    if (m_perceptionIndicatorLabel == nullptr)
+    {
+        return;
+    }
+
+    m_perceptionIndicatorLabel->setVisible(m_isScreenPerceptionEnabled);
+
+    if (m_isScreenPerceptionEnabled && m_currentImageSize.isValid())
+    {
+        m_perceptionIndicatorLabel->move(m_currentImageSize.width() - 14, 2);
+        m_perceptionIndicatorLabel->raise();
+    }
 }
 
 void MainWindow::ToggleVoiceRecording()

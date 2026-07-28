@@ -45,6 +45,9 @@ set(VPET_SOURCES
     src/agent/proactive_topic_node.cpp
     src/agent/invocation_queue_policy.cpp
     src/agent/agent_output_policy.cpp
+    src/agent/agent_node_registry.cpp
+    src/agent/agent_graph_executor.cpp
+    src/agent/agent_async_bridge.cpp
     src/agent/agent_runtime.cpp
 )
 
@@ -78,6 +81,9 @@ set(VPET_HEADERS
     include/vpet/agent/proactive_topic_node.h
     include/vpet/agent/invocation_queue_policy.h
     include/vpet/agent/agent_output_policy.h
+    include/vpet/agent/agent_node_registry.h
+    include/vpet/agent/agent_graph_executor.h
+    include/vpet/agent/agent_async_bridge.h
     include/vpet/agent/agent_runtime.h
     src/main_window.h
 )
@@ -134,6 +140,9 @@ if(BUILD_TESTING)
         src/agent/proactive_topic_node.cpp
         src/agent/invocation_queue_policy.cpp
         src/agent/agent_output_policy.cpp
+        src/agent/agent_node_registry.cpp
+        src/agent/agent_graph_executor.cpp
+        src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
         src/llm/llm_client.cpp
         src/llm/vision_llm_client.cpp
@@ -144,6 +153,9 @@ if(BUILD_TESTING)
         include/vpet/agent/proactive_topic_node.h
         include/vpet/agent/invocation_queue_policy.h
         include/vpet/agent/agent_output_policy.h
+        include/vpet/agent/agent_node_registry.h
+        include/vpet/agent/agent_graph_executor.h
+        include/vpet/agent/agent_async_bridge.h
         include/vpet/agent/agent_runtime.h
         include/vpet/llm/llm_client.h
         include/vpet/llm/vision_llm_client.h
@@ -173,6 +185,9 @@ if(BUILD_TESTING)
         src/agent/proactive_topic_node.cpp
         src/agent/invocation_queue_policy.cpp
         src/agent/agent_output_policy.cpp
+        src/agent/agent_node_registry.cpp
+        src/agent/agent_graph_executor.cpp
+        src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
         src/llm/llm_client.cpp
         src/llm/vision_llm_client.cpp
@@ -183,6 +198,9 @@ if(BUILD_TESTING)
         include/vpet/agent/proactive_topic_node.h
         include/vpet/agent/invocation_queue_policy.h
         include/vpet/agent/agent_output_policy.h
+        include/vpet/agent/agent_node_registry.h
+        include/vpet/agent/agent_graph_executor.h
+        include/vpet/agent/agent_async_bridge.h
         include/vpet/agent/agent_runtime.h
         include/vpet/llm/llm_client.h
         include/vpet/llm/vision_llm_client.h

@@ -39,11 +39,13 @@ VoiceInputManager::VoiceInputManager(QObject *parent)
     , m_audioInput(nullptr)
     , m_mediaRecorder(new QMediaRecorder(this))
     , m_asrProcess(new QProcess(this))
+    , m_recordSessionDirectory()
     , m_recordInputDirectory()
     , m_recordOutputDirectory()
     , m_recordAudioPath()
     , m_asrOutputFilePath()
     , m_isRecording(false)
+    , m_awaitingRecorderStop(false)
 {
     m_audioInput = new QAudioInput(QMediaDevices::defaultAudioInput(), this);
     m_captureSession->setAudioInput(m_audioInput);
@@ -57,6 +59,8 @@ VoiceInputManager::VoiceInputManager(QObject *parent)
 
     connect(m_mediaRecorder, &QMediaRecorder::errorOccurred,
             this, &VoiceInputManager::OnRecorderError);
+    connect(m_mediaRecorder, &QMediaRecorder::recorderStateChanged,
+            this, &VoiceInputManager::OnRecorderStateChanged);
     connect(m_asrProcess,
             static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
             this,
@@ -75,11 +79,13 @@ VoiceInputManager::~VoiceInputManager()
         m_asrProcess->kill();
         m_asrProcess->waitForFinished(3000);
     }
+
+    CleanupRecordDirectory();
 }
 
 bool VoiceInputManager::StartRecording()
 {
-    if (m_isRecording)
+    if (m_isRecording || m_awaitingRecorderStop)
     {
         emit TranscriptionFailed(QStringLiteral("Voice input is already recording."));
         return false;
@@ -102,6 +108,7 @@ bool VoiceInputManager::StartRecording()
     m_mediaRecorder->setOutputLocation(QUrl::fromLocalFile(m_recordAudioPath));
     m_mediaRecorder->record();
     m_isRecording = true;
+    m_awaitingRecorderStop = false;
     emit RecordingStarted();
 
     return true;
@@ -115,17 +122,16 @@ bool VoiceInputManager::StopRecording()
         return false;
     }
 
-    m_mediaRecorder->stop();
-    m_isRecording = false;
-    emit RecordingStopped(m_recordAudioPath);
-
-    QString errorMessage;
-
-    if (!StartAsrProcess(errorMessage))
+    if (m_awaitingRecorderStop)
     {
-        emit TranscriptionFailed(errorMessage);
-        return false;
+        return true;
     }
+
+    // stop() 是异步的：必须等 recorderStateChanged → StoppedState 后再启动 ASR，
+    // 否则 WAV 可能尚未写完，识别会失败或截断。
+    m_awaitingRecorderStop = true;
+    m_isRecording = false;
+    m_mediaRecorder->stop();
 
     return true;
 }
@@ -139,12 +145,15 @@ void VoiceInputManager::OnAsrProcessFinished(int exitCode, int exitStatus)
 {
     if ((exitStatus != QProcess::NormalExit) || (exitCode != 0))
     {
-        const QString errorText = QString::fromUtf8(m_asrProcess->readAllStandardError()).trimmed();
-        const QString outputText = QString::fromUtf8(m_asrProcess->readAllStandardOutput()).trimmed();
-        const QString message = QStringLiteral("Voice ASR process failed. stdout: %1 stderr: %2").arg(
-                                outputText,
-                                errorText);
+        const qsizetype standardOutputSize = m_asrProcess->readAllStandardOutput().size();
+        const qsizetype standardErrorSize = m_asrProcess->readAllStandardError().size();
+        const QString message = QStringLiteral(
+                                    "Voice ASR process failed. exit code: %1, stdout bytes: %2, stderr bytes: %3")
+                                .arg(exitCode)
+                                .arg(standardOutputSize)
+                                .arg(standardErrorSize);
 
+        CleanupRecordDirectory();
         emit TranscriptionFailed(message);
         return;
     }
@@ -154,10 +163,12 @@ void VoiceInputManager::OnAsrProcessFinished(int exitCode, int exitStatus)
 
     if (!ReadTranscriptionText(text, errorMessage))
     {
+        CleanupRecordDirectory();
         emit TranscriptionFailed(errorMessage);
         return;
     }
 
+    CleanupRecordDirectory();
     emit TranscriptionCompleted(text);
 }
 
@@ -166,16 +177,45 @@ void VoiceInputManager::OnRecorderError()
     const QString message = QStringLiteral("Voice recorder error: %1").arg(
                             m_mediaRecorder->errorString());
 
-    if (m_isRecording)
+    m_isRecording = false;
+    m_awaitingRecorderStop = false;
+
+    CleanupRecordDirectory();
+    emit TranscriptionFailed(message);
+}
+
+void VoiceInputManager::OnRecorderStateChanged(QMediaRecorder::RecorderState state)
+{
+    if (!m_awaitingRecorderStop)
     {
-        m_isRecording = false;
+        return;
     }
 
-    emit TranscriptionFailed(message);
+    if (state != QMediaRecorder::StoppedState)
+    {
+        return;
+    }
+
+    m_awaitingRecorderStop = false;
+    emit RecordingStopped(m_recordAudioPath);
+
+    QString errorMessage;
+
+    if (!StartAsrProcess(errorMessage))
+    {
+        CleanupRecordDirectory();
+        emit TranscriptionFailed(errorMessage);
+    }
 }
 
 bool VoiceInputManager::PrepareRecordDirectory(QString &errorMessage)
 {
+    if (!CleanupRecordDirectory())
+    {
+        errorMessage = QStringLiteral("Failed to clean the previous voice input directory.");
+        return false;
+    }
+
     const QString baseDirectory = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
 
     if (baseDirectory.trimmed().isEmpty())
@@ -185,21 +225,23 @@ bool VoiceInputManager::PrepareRecordDirectory(QString &errorMessage)
     }
 
     const QString timestamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd_hhmmss_zzz"));
-    const QString sessionDirectory = QDir(baseDirectory).filePath(
-                                     VOICE_INPUT_DIRECTORY_NAME + QStringLiteral("/") + timestamp);
+    m_recordSessionDirectory = QDir(baseDirectory).filePath(
+                                   VOICE_INPUT_DIRECTORY_NAME + QStringLiteral("/") + timestamp);
     QDir directory;
 
-    if (!directory.mkpath(sessionDirectory))
+    if (!directory.mkpath(m_recordSessionDirectory))
     {
+        m_recordSessionDirectory.clear();
         errorMessage = QStringLiteral("Failed to create voice input directory.");
         return false;
     }
 
-    m_recordInputDirectory = QDir(sessionDirectory).filePath(QStringLiteral("input"));
-    m_recordOutputDirectory = QDir(sessionDirectory).filePath(QStringLiteral("output"));
+    m_recordInputDirectory = QDir(m_recordSessionDirectory).filePath(QStringLiteral("input"));
+    m_recordOutputDirectory = QDir(m_recordSessionDirectory).filePath(QStringLiteral("output"));
 
     if (!directory.mkpath(m_recordInputDirectory) || !directory.mkpath(m_recordOutputDirectory))
     {
+        CleanupRecordDirectory();
         errorMessage = QStringLiteral("Failed to create voice ASR working directories.");
         return false;
     }
@@ -368,6 +410,28 @@ bool VoiceInputManager::ReadTranscriptionText(QString &text, QString &errorMessa
         errorMessage = QStringLiteral("Voice ASR transcription text is empty.");
         return false;
     }
+
+    return true;
+}
+
+bool VoiceInputManager::CleanupRecordDirectory()
+{
+    if (!m_recordSessionDirectory.isEmpty())
+    {
+        QDir sessionDirectory(m_recordSessionDirectory);
+
+        if (sessionDirectory.exists() && !sessionDirectory.removeRecursively())
+        {
+            qWarning() << "[VoiceInput] Failed to remove temporary session directory.";
+            return false;
+        }
+    }
+
+    m_recordSessionDirectory.clear();
+    m_recordInputDirectory.clear();
+    m_recordOutputDirectory.clear();
+    m_recordAudioPath.clear();
+    m_asrOutputFilePath.clear();
 
     return true;
 }

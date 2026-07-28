@@ -49,7 +49,7 @@ TtsAudioPlayer::~TtsAudioPlayer()
 
 bool TtsAudioPlayer::Play(const QString &filePath)
 {
-    qDebug() << "[TTS] TtsAudioPlayer::Play, file:" << filePath;
+    qDebug() << "[TTS] TtsAudioPlayer::Play";
 
     // 检查参数有效性
     if (filePath.isEmpty())
