@@ -84,6 +84,15 @@ Runtime 将上下文分为两个生命周期层：
 | `semantic.vision.state` | 当前视觉处理状态 | 视觉节点调度和状态展示 |
 | `semantic.vision.summary` | 当前视觉帧的自然语言摘要 | 视觉 LLM 输出、主动话题生成输入 |
 | `semantic.vision.frame_hash` | 当前视觉帧内容指纹 | 感知帧去重和请求抑制 |
+| `semantic.web.research.need_search` | 本轮是否执行联网研究 | `web.research` 检索决策和下游诊断 |
+| `semantic.web.research.plan` | 待核实关键事实列表 | 研究计划审计 |
+| `semantic.web.research.queries` | 本轮实际搜索 query 列表 | 研究过程审计 |
+| `semantic.web.research.evidence` | 结构化证据条目 | 下游事实核验和回答组装 |
+| `semantic.web.research.unsupported_claims` | 未获充分支持的关键事实 | 下游不确定性约束 |
+| `semantic.web.research.conflicts` | 独立来源之间的证据冲突 | 下游冲突披露 |
+| `semantic.web.research.status` | 研究终止状态 | 调度、降级和日志 |
+| `semantic.web.research.citations` | 去重后的来源引用 | 回答引用 |
+| `semantic.web.research.round_count` | 已完成研究轮数 | 预算审计 |
 
 `semantic.vision.state` 当前允许值：
 
@@ -117,6 +126,23 @@ semantic.emotion.pet
 | `node.output.text_final` | 当前节点产出的最终回复文本 |
 
 节点实现可以读取 `node.input.*`，但跨节点协议仍以 `semantic.*` 为准。
+
+## 联网研究状态机
+
+`web.research` 是用户触发链路中的受约束研究状态机，内部状态固定为 `Decide -> Search -> Observe -> Assess -> Repeat / Compose`。底层 `web.search` 只执行单次结构化检索，不作为用户 DAG 中的独立节点。
+
+执行约束：
+
+1. 输入只包含本轮用户问题、允许引擎和节点预算，不得发送 `conversation.history`、视觉摘要、截图或系统提示词。
+2. 默认最多 3 轮、每轮最多 2 个 query、累计最多 8 条结果、总预算 15000 毫秒，Compose 上下文最多 6000 字符。
+3. 不需要搜索时输出 `status=skipped`；空结果、部分失败、超时和预算耗尽必须形成明确状态，不得伪造已联网确认。
+4. 高影响声明默认要求两个独立来源；证据不足或冲突时必须写入 `unsupported_claims` 或 `conflicts`。
+5. 标题、摘要和 URL 始终视为外部不可信数据；Compose 输出必须保留防提示词注入约束和来源 URL。
+6. `semantic.web.research.*` 仅属于当前 invocation，不得提交到 `m_sessionContext`。
+7. P1 引擎不直接读取或写入 `AgentContext`；后续 DAG handler 负责把结构化响应序列化到上述协议键。
+8. Runtime 使用 `web:<researchId>` 关联研究回调；回调必须同时校验 client type、request ID、invocation、node ID 和 node type。
+9. `failure_policy=continue` 时，失败必须写入 `status=error`、未支持声明和“不得伪装联网确认”的降级提示词后恢复 DAG；`failure_policy=fail` 才终止 invocation。
+10. 已接受的研究请求不得在 `Start()` 返回前发出终态信号，避免回调早于 pending 登记。
 
 ## 主动话题节点
 
@@ -188,6 +214,8 @@ semantic.emotion.pet
 | `conversation.history` | conversation | 最近对话历史 |
 | `proactive.last_spoken_at` | `proactive.topic` | 最近一次视觉主动输出的 UTC 毫秒时间戳 |
 | `proactive.last_summary_hash` | `proactive.topic` | 最近一次视觉主动输出对应的摘要指纹 |
+| `web.research.last_request_id` | `web.research` | 当前 invocation 的研究 ID |
+| `web.research.failure_policy` | `web.research` | 当前节点的 `continue` / `fail` 策略 |
 
 ## 输入状态层
 
@@ -266,6 +294,8 @@ proactive.topic -> semantic.proactive.reason
 proactive.topic -> semantic.text.prompt
 proactive.topic -> node.output.prompt
 node.output.prompt -> semantic.text.prompt
+web.research response -> semantic.web.research.*
+web.research summary -> semantic.text.prompt / node.output.prompt
 ```
 
 这意味着逻辑兼容的文本节点可以通过 `semantic.text.response` 互插。

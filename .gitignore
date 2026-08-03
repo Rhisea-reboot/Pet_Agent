@@ -16,7 +16,13 @@ Release/
 
 # Local LLM credentials
 llm_config.json
+web_search_config.json
 vision_llm_config.json
+
+# Local open-webSearch runtime artifacts
+vendor/open-webSearch/node_modules/
+vendor/open-webSearch/build/
+vendor/open-webSearch/.runtime/
 
 # GPT-SoVITS — 排除大型二进制文件，仅跟踪 Python 源码与配置
 GPT-SoVITS/runtime/

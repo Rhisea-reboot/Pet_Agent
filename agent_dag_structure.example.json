@@ -8,6 +8,23 @@
       }
     },
     {
+      "id": "web_research",
+      "type": "web.research",
+      "config": {
+        "mode": "auto",
+        "failure_policy": "continue",
+        "max_search_rounds": 3,
+        "max_queries_per_round": 2,
+        "max_total_results": 8,
+        "max_context_chars": 6000,
+        "total_deadline_ms": 15000,
+        "async_timeout_ms": 17000,
+        "require_citations_for_realtime_claims": true,
+        "require_independent_sources_for_high_impact_claims": true,
+        "engines": ["bing"]
+      }
+    },
+    {
       "id": "vision_input",
       "type": "vision.input",
       "config": {
@@ -48,7 +65,8 @@
     }
   ],
   "edges": [
-    { "from": "user_input", "to": "call_llm" },
+    { "from": "user_input", "to": "web_research" },
+    { "from": "web_research", "to": "call_llm" },
     { "from": "vision_input", "to": "vision_llm" },
     { "from": "vision_llm", "to": "proactive_topic" },
     { "from": "proactive_topic", "to": "call_llm" },

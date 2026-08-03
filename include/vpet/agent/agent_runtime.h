@@ -23,6 +23,8 @@ namespace vpet
 {
 
 class LlmClient;
+class WebResearchEngine;
+struct _tagWebResearchResponse;
 
 /**
  * @brief Agent DAG 运行时启动器
@@ -45,6 +47,13 @@ public:
      * @param[in] parent 父对象
      */
     explicit AgentRuntime(QObject *parent = nullptr);
+
+    /**
+     * @brief 使用可注入研究引擎构造运行时
+     * @param[in] webResearchEngine 外部研究引擎；为空时由运行时创建
+     * @param[in] parent 父对象
+     */
+    AgentRuntime(WebResearchEngine *webResearchEngine, QObject *parent);
 
     /**
      * @brief 析构函数
@@ -118,6 +127,11 @@ public:
      * @return 加载成功返回 true
      */
     bool LoadDefaultVisionLlmConfig(QString &errorMessage);
+
+    /** @brief 加载联网搜索配置。 @param[in] configPath 配置路径。 @param[out] errorMessage 错误描述。 @return 成功返回 true。 */
+    bool LoadWebSearchConfig(const QString &configPath, QString &errorMessage);
+    /** @brief 自动加载联网搜索配置。 @param[out] errorMessage 错误描述。 @return 成功返回 true。 */
+    bool LoadDefaultWebSearchConfig(QString &errorMessage);
 
     /**
      * @brief 判断文本 LLM 是否可用
@@ -251,6 +265,11 @@ private slots:
      */
     void OnVisionAnalysisFailed(int requestId, const QString &message, int statusCode);
 
+    /** @brief 处理联网研究完成。 @param[in] response 结构化研究结果。 */
+    void OnWebResearchCompleted(const _tagWebResearchResponse &response);
+    /** @brief 处理联网研究失败。 @param[in] researchId 研究 ID。 @param[in] message 错误描述。 @param[in] statusCode HTTP 状态码。 */
+    void OnWebResearchFailed(int researchId, const QString &message, int statusCode);
+
 private:
     /**
      * @brief 执行单个 Agent 节点
@@ -373,8 +392,13 @@ private:
      * @return 执行成功返回 true
      */
     bool ExecuteLlmChatNode(const _tagAgentDagNode &node,
-                            AgentContext &context,
-                            QString &errorMessage);
+                             AgentContext &context,
+                             QString &errorMessage);
+
+    /** @brief 执行联网研究节点。 @param[in] node 节点定义。 @param[in,out] context 上下文。 @param[out] errorMessage 错误描述。 @return 成功返回 true。 */
+    bool ExecuteWebResearchNode(const _tagAgentDagNode &node,
+                                AgentContext &context,
+                                QString &errorMessage);
 
     /**
      * @brief 执行输出格式化节点
@@ -475,6 +499,8 @@ private:
      * @return 配置文件绝对路径；未找到返回空字符串
      */
     QString FindDefaultVisionLlmConfigPath() const;
+    /** @brief 查找默认联网搜索配置。 @return 配置绝对路径，未找到返回空字符串。 */
+    QString FindDefaultWebSearchConfigPath() const;
 
     /**
      * @brief 将用户输入提交到文本 LLM
@@ -492,6 +518,7 @@ private:
     AgentContext m_sessionContext;        ///< 跨调用持久化的会话基座
     LlmClient *m_llmClient;                ///< 文本 LLM 客户端
     VisionLlmClient *m_visionLlmClient;    ///< 视觉 LLM 客户端
+    WebResearchEngine *m_webResearchEngine; ///< 联网研究引擎
     AgentNodeRegistry m_nodeRegistry;     ///< 节点注册与别名执行组件
     AgentGraphExecutor m_graphExecutor;   ///< DAG 与单轮调度组件
     AgentAsyncBridge m_asyncBridge;       ///< 异步请求关联组件

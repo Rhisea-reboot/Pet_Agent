@@ -2,9 +2,11 @@
 #include "vpet/agent/agent_context_keys.h"
 #include "vpet/agent/emotion_rewrite_node.h"
 #include "vpet/agent/proactive_topic_node.h"
+#include "vpet/agent/web_research_node.h"
 #include "vpet/agent/agent_output_policy.h"
 #include "vpet/llm/llm_client.h"
 #include "vpet/llm/vision_llm_client.h"
+#include "vpet/web/web_research_engine.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -25,6 +27,7 @@ namespace
 
 const QString LLM_CONFIG_FILE_NAME = QStringLiteral("llm_config.json");
 const QString VISION_LLM_CONFIG_FILE_NAME = QStringLiteral("vision_llm_config.json");
+const QString WEB_SEARCH_CONFIG_FILE_NAME = QStringLiteral("web_search_config.json");
 const QString &NODE_TYPE_VISION_INPUT = AgentContextKeys::NODE_TYPE_VISION_INPUT;
 const QString &NODE_TYPE_VISION_LLM = AgentContextKeys::NODE_TYPE_VISION_LLM;
 const QString &NODE_TYPE_LLM_CHAT = AgentContextKeys::NODE_TYPE_LLM_CHAT;
@@ -32,6 +35,7 @@ const QString &NODE_TYPE_EMOTION_REWRITE = AgentContextKeys::NODE_TYPE_EMOTION_R
 const QString &NODE_TYPE_OUTPUT_FORMAT = AgentContextKeys::NODE_TYPE_OUTPUT_FORMAT;
 const QString &NODE_TYPE_PROACTIVE_TOPIC = AgentContextKeys::NODE_TYPE_PROACTIVE_TOPIC;
 const QString &NODE_TYPE_USER_INPUT = AgentContextKeys::NODE_TYPE_USER_INPUT;
+const QString &NODE_TYPE_WEB_RESEARCH = AgentContextKeys::NODE_TYPE_WEB_RESEARCH;
 const QString &CONTEXT_KEY_CONVERSATION_HISTORY = AgentContextKeys::CONVERSATION_HISTORY;
 const QString &CONTEXT_KEY_EMOTION_OUTPUT_TEXT = AgentContextKeys::EMOTION_OUTPUT_TEXT;
 const QString &CONTEXT_KEY_INPUT_AVAILABLE = AgentContextKeys::INPUT_AVAILABLE;
@@ -80,6 +84,7 @@ const QString TRIGGER_TYPE_USER = QStringLiteral("user");
 const QString TRIGGER_TYPE_VISION = QStringLiteral("vision");
 const QString ASYNC_CLIENT_TEXT = QStringLiteral("text");
 const QString ASYNC_CLIENT_VISION = QStringLiteral("vision");
+const QString ASYNC_CLIENT_WEB = QStringLiteral("web");
 const QString OUTPUT_SOURCE_USER_RESPONSE = QStringLiteral("user_response");
 const QString OUTPUT_SOURCE_VISION_PROACTIVE = QStringLiteral("vision_proactive");
 
@@ -97,11 +102,19 @@ QString ResolveVisionMediaType(const QString &modality)
 } // anonymous namespace
 
 AgentRuntime::AgentRuntime(QObject *parent)
+    : AgentRuntime(nullptr, parent)
+{
+}
+
+AgentRuntime::AgentRuntime(WebResearchEngine *webResearchEngine, QObject *parent)
     : QObject(parent)
     , m_context()
     , m_sessionContext()
     , m_llmClient(new LlmClient(this))
     , m_visionLlmClient(new VisionLlmClient(this))
+    , m_webResearchEngine(webResearchEngine != nullptr
+                              ? webResearchEngine
+                              : new WebResearchEngine(nullptr, this))
     , m_nodeRegistry()
     , m_graphExecutor()
     , m_asyncBridge()
@@ -118,6 +131,10 @@ AgentRuntime::AgentRuntime(QObject *parent)
             this, &AgentRuntime::OnVisionAnalysisCompleted);
     connect(m_visionLlmClient, &VisionLlmClient::AnalysisFailed,
             this, &AgentRuntime::OnVisionAnalysisFailed);
+    connect(m_webResearchEngine, &WebResearchEngine::Completed,
+            this, &AgentRuntime::OnWebResearchCompleted);
+    connect(m_webResearchEngine, &WebResearchEngine::Failed,
+            this, &AgentRuntime::OnWebResearchFailed);
 
     RegisterDefaultNodeHandlers();
 }
@@ -330,6 +347,23 @@ bool AgentRuntime::LoadVisionLlmConfig(const QString &configPath, QString &error
     return true;
 }
 
+bool AgentRuntime::LoadWebSearchConfig(const QString &configPath, QString &errorMessage)
+{
+    if (configPath.trimmed().isEmpty() || (m_webResearchEngine == nullptr))
+    {
+        errorMessage = QStringLiteral("Agent web search config input is invalid.");
+        return false;
+    }
+
+    if (!m_webResearchEngine->LoadClientConfig(configPath, errorMessage))
+    {
+        return false;
+    }
+
+    emit LogMessage(QStringLiteral("Agent web search config loaded: %1").arg(configPath));
+    return true;
+}
+
 bool AgentRuntime::UpdatePerceptionFrame(const QByteArray &encodedData,
                                           int frameId,
                                           const QSize &frameSize,
@@ -493,6 +527,19 @@ bool AgentRuntime::LoadDefaultVisionLlmConfig(QString &errorMessage)
     }
 
     return LoadVisionLlmConfig(configPath, errorMessage);
+}
+
+bool AgentRuntime::LoadDefaultWebSearchConfig(QString &errorMessage)
+{
+    const QString configPath = FindDefaultWebSearchConfigPath();
+
+    if (configPath.isEmpty())
+    {
+        errorMessage = QStringLiteral("web_search_config.json not found.");
+        return false;
+    }
+
+    return LoadWebSearchConfig(configPath, errorMessage);
 }
 
 bool AgentRuntime::IsLlmConfigured() const
@@ -663,9 +710,16 @@ bool AgentRuntime::RegisterPendingNode(const _tagAgentDagNode &node,
     }
 
     const int requestId = requestIdValue.toInt();
-    const QString clientType = (nodeType == NODE_TYPE_VISION_LLM)
-                                   ? ASYNC_CLIENT_VISION
-                                   : ASYNC_CLIENT_TEXT;
+    QString clientType = ASYNC_CLIENT_TEXT;
+
+    if (nodeType == NODE_TYPE_VISION_LLM)
+    {
+        clientType = ASYNC_CLIENT_VISION;
+    }
+    else if (nodeType == NODE_TYPE_WEB_RESEARCH)
+    {
+        clientType = ASYNC_CLIENT_WEB;
+    }
     const QString pendingKey = m_asyncBridge.BuildRequestKey(clientType, requestId);
     const int timeoutMs = node.config.value(QStringLiteral("async_timeout_ms"))
                               .toInt(DEFAULT_ASYNC_TIMEOUT_MS);
@@ -909,6 +963,15 @@ bool AgentRuntime::PrepareTextInputContext(AgentContext &context, QString &error
     context.RemoveValue(AgentContextKeys::SEMANTIC_PROACTIVE_REASON);
     context.RemoveValue(AgentContextKeys::SEMANTIC_PROACTIVE_SHOULD_SPEAK);
     context.RemoveValue(AgentContextKeys::SEMANTIC_PROACTIVE_TOPIC);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_NEED_SEARCH);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_PLAN);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_QUERIES);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_EVIDENCE);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_UNSUPPORTED_CLAIMS);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_CONFLICTS);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_STATUS);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_CITATIONS);
+    context.RemoveValue(AgentContextKeys::SEMANTIC_WEB_RESEARCH_ROUND_COUNT);
     context.RemoveValue(CONTEXT_KEY_PROMPT_TEXT);
     ClearAsyncPendingState(context);
 
@@ -1250,6 +1313,50 @@ bool AgentRuntime::ExecuteLlmChatNode(const _tagAgentDagNode &node,
     return true;
 }
 
+bool AgentRuntime::ExecuteWebResearchNode(const _tagAgentDagNode &node,
+                                          AgentContext &context,
+                                          QString &errorMessage)
+{
+    if (m_webResearchEngine == nullptr)
+    {
+        errorMessage = QStringLiteral("Agent web research engine is not initialized.");
+        return false;
+    }
+
+    _tagWebResearchRequest request;
+
+    if (!WebResearchNode::BuildRequest(node, context, request, errorMessage))
+    {
+        return false;
+    }
+
+    const int researchId = m_webResearchEngine->Start(request);
+
+    if (researchId <= 0)
+    {
+        errorMessage = QStringLiteral("Agent web research node failed to start.");
+        return false;
+    }
+
+    if (!context.SetValue(AgentContextKeys::WEB_RESEARCH_FAILURE_POLICY,
+                          request.config.failurePolicy)
+        || !context.SetValue(AgentContextKeys::WEB_RESEARCH_LAST_REQUEST_ID, researchId))
+    {
+        m_webResearchEngine->Cancel();
+        errorMessage = QStringLiteral("Agent web research node failed to record request state.");
+        return false;
+    }
+
+    if (!SetAsyncPendingState(node, context, researchId, errorMessage))
+    {
+        m_webResearchEngine->Cancel();
+        return false;
+    }
+
+    emit LogMessage(QStringLiteral("Agent web research node started: %1").arg(researchId));
+    return true;
+}
+
 bool AgentRuntime::ExecuteOutputFormatNode(const _tagAgentDagNode &node,
                                            AgentContext &context,
                                            QString &errorMessage)
@@ -1448,12 +1555,20 @@ void AgentRuntime::ClearAsyncPendingState(AgentContext &context)
 
 void AgentRuntime::ResetAsyncExecutionState(AgentContext &context)
 {
+    const bool shouldCancelWebResearch = (m_webResearchEngine != nullptr)
+                                         && m_webResearchEngine->IsBusy();
     context.SetValue(CONTEXT_KEY_LLM_PENDING, false);
     context.SetValue(CONTEXT_KEY_VISION_LLM_PENDING, false);
     ClearAsyncPendingState(context);
     ClearInvocationInputState(context);
     m_graphExecutor.ClearInvocationState();
     m_asyncBridge.ClearPending();
+
+    if (shouldCancelWebResearch)
+    {
+        m_webResearchEngine->Cancel();
+    }
+
     context = m_sessionContext.Snapshot();
 
     if (!m_invocationQueue.IsEmpty())
@@ -1543,6 +1658,14 @@ void AgentRuntime::RegisterDefaultNodeHandlers()
         return ExecuteLlmChatNode(node, context, errorMessage);
     });
 
+    RegisterNodeHandler(NODE_TYPE_WEB_RESEARCH,
+                        [this](const _tagAgentDagNode &node,
+                               AgentContext &context,
+                               QString &errorMessage)
+    {
+        return ExecuteWebResearchNode(node, context, errorMessage);
+    });
+
     RegisterNodeHandler(NODE_TYPE_EMOTION_REWRITE,
                         [this](const _tagAgentDagNode &node,
                                AgentContext &context,
@@ -1615,6 +1738,28 @@ QString AgentRuntime::FindDefaultVisionLlmConfigPath() const
         QDir::currentPath() + QStringLiteral("/") + VISION_LLM_CONFIG_FILE_NAME,
         exeDir + QStringLiteral("/../") + VISION_LLM_CONFIG_FILE_NAME,
         exeDir + QStringLiteral("/../../") + VISION_LLM_CONFIG_FILE_NAME
+    };
+
+    for (const QString &candidatePath : candidatePaths)
+    {
+        if (QFileInfo::exists(candidatePath))
+        {
+            return QFileInfo(candidatePath).absoluteFilePath();
+        }
+    }
+
+    return QString();
+}
+
+QString AgentRuntime::FindDefaultWebSearchConfigPath() const
+{
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    const QStringList candidatePaths =
+    {
+        exeDir + QStringLiteral("/") + WEB_SEARCH_CONFIG_FILE_NAME,
+        QDir::currentPath() + QStringLiteral("/") + WEB_SEARCH_CONFIG_FILE_NAME,
+        exeDir + QStringLiteral("/../") + WEB_SEARCH_CONFIG_FILE_NAME,
+        exeDir + QStringLiteral("/../../") + WEB_SEARCH_CONFIG_FILE_NAME
     };
 
     for (const QString &candidatePath : candidatePaths)
@@ -1879,6 +2024,105 @@ void AgentRuntime::OnVisionAnalysisFailed(int requestId, const QString &message,
 
     emit LogMessage(QStringLiteral("Agent Vision LLM request failed: %1 %2").arg(
                         requestId).arg(outputMessage));
+}
+
+void AgentRuntime::OnWebResearchCompleted(const _tagWebResearchResponse &response)
+{
+    const int researchId = response.researchId;
+    const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_WEB, researchId);
+
+    if ((researchId <= 0) || pendingKey.isEmpty()
+        || !m_asyncBridge.ContainsPending(pendingKey))
+    {
+        emit LogMessage(QStringLiteral("Agent web research completion ignored because request is unknown."));
+        return;
+    }
+
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
+
+    if (!m_asyncBridge.GetPending(pendingKey, pendingRequest)
+        || (pendingRequest.clientType != ASYNC_CLIENT_WEB)
+        || (pendingRequest.nodeType != NODE_TYPE_WEB_RESEARCH)
+        || (pendingRequest.requestId != researchId))
+    {
+        emit LogMessage(QStringLiteral("Agent web research completion ignored because correlation does not match."));
+        return;
+    }
+
+    AgentContext callbackContext = pendingRequest.context.Snapshot();
+    QString errorMessage;
+
+    if (!WebResearchNode::Complete(response, callbackContext, errorMessage))
+    {
+        ResetAsyncExecutionState(m_context);
+        emit LogMessage(errorMessage);
+        return;
+    }
+
+    ClearAsyncPendingState(callbackContext);
+
+    if (!ResumePendingNode(pendingKey, researchId, callbackContext, errorMessage))
+    {
+        ResetAsyncExecutionState(m_context);
+        emit LogMessage(errorMessage);
+    }
+}
+
+void AgentRuntime::OnWebResearchFailed(int researchId,
+                                       const QString &message,
+                                       int statusCode)
+{
+    (void)statusCode;
+    const QString pendingKey = BuildPendingRequestKey(ASYNC_CLIENT_WEB, researchId);
+
+    if ((researchId <= 0) || pendingKey.isEmpty()
+        || !m_asyncBridge.ContainsPending(pendingKey))
+    {
+        emit LogMessage(QStringLiteral("Agent web research failure ignored because request is unknown."));
+        return;
+    }
+
+    AgentAsyncBridge::_tagPendingRequest pendingRequest;
+
+    if (!m_asyncBridge.GetPending(pendingKey, pendingRequest)
+        || (pendingRequest.clientType != ASYNC_CLIENT_WEB)
+        || (pendingRequest.nodeType != NODE_TYPE_WEB_RESEARCH))
+    {
+        emit LogMessage(QStringLiteral("Agent web research failure ignored because correlation does not match."));
+        return;
+    }
+
+    AgentContext callbackContext = pendingRequest.context.Snapshot();
+    QVariant policyValue;
+    const QString failurePolicy = callbackContext.GetValue(
+                                      AgentContextKeys::WEB_RESEARCH_FAILURE_POLICY,
+                                      policyValue)
+                                      ? policyValue.toString().trimmed().toLower()
+                                      : QStringLiteral("continue");
+
+    if (failurePolicy == QStringLiteral("fail"))
+    {
+        ResetAsyncExecutionState(m_context);
+        emit LogMessage(QStringLiteral("Agent web research failed with fail policy."));
+        return;
+    }
+
+    QString errorMessage;
+
+    if (!WebResearchNode::CompleteFailure(message, callbackContext, errorMessage))
+    {
+        ResetAsyncExecutionState(m_context);
+        emit LogMessage(errorMessage);
+        return;
+    }
+
+    ClearAsyncPendingState(callbackContext);
+
+    if (!ResumePendingNode(pendingKey, researchId, callbackContext, errorMessage))
+    {
+        ResetAsyncExecutionState(m_context);
+        emit LogMessage(errorMessage);
+    }
 }
 
 } // namespace vpet

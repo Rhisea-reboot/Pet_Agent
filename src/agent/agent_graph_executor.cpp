@@ -851,6 +851,15 @@ bool AgentGraphExecutor::CreateJoinBranch(const QString &childNodeId, QString &e
     }
 
     const QJsonObject mergeRules = mergeValue.toObject();
+
+    if ((joinNode.type == AgentContextKeys::NODE_TYPE_LLM_CHAT) && mergeRules.isEmpty())
+    {
+        errorMessage = QStringLiteral(
+                           "Agent runtime llm.chat has multiple active parents without an explicit merge policy: %1")
+                           .arg(normalizedChildNodeId);
+        return false;
+    }
+
     QSet<QString> candidateKeys;
 
     for (const QString &predecessorId : predecessors)

@@ -39,10 +39,14 @@ set(VPET_SOURCES
     src/speech/voice_input_manager.cpp
     src/llm/llm_client.cpp
     src/llm/vision_llm_client.cpp
+    src/web/web_search_client.cpp
+    src/web/web_search_tool.cpp
+    src/web/web_research_engine.cpp
     src/agent/agent_context.cpp
     src/agent/agent_dag_graph.cpp
     src/agent/emotion_rewrite_node.cpp
     src/agent/proactive_topic_node.cpp
+    src/agent/web_research_node.cpp
     src/agent/invocation_queue_policy.cpp
     src/agent/agent_output_policy.cpp
     src/agent/agent_node_registry.cpp
@@ -74,11 +78,15 @@ set(VPET_HEADERS
     include/vpet/speech/voice_input_manager.h
     include/vpet/llm/llm_client.h
     include/vpet/llm/vision_llm_client.h
+    include/vpet/web/web_search_client.h
+    include/vpet/web/web_search_tool.h
+    include/vpet/web/web_research_engine.h
     include/vpet/agent/agent_context.h
     include/vpet/agent/agent_context_keys.h
     include/vpet/agent/agent_dag_graph.h
     include/vpet/agent/emotion_rewrite_node.h
     include/vpet/agent/proactive_topic_node.h
+    include/vpet/agent/web_research_node.h
     include/vpet/agent/invocation_queue_policy.h
     include/vpet/agent/agent_output_policy.h
     include/vpet/agent/agent_node_registry.h
@@ -138,12 +146,16 @@ if(BUILD_TESTING)
         src/agent/agent_dag_graph.cpp
         src/agent/emotion_rewrite_node.cpp
         src/agent/proactive_topic_node.cpp
+        src/agent/web_research_node.cpp
         src/agent/invocation_queue_policy.cpp
         src/agent/agent_output_policy.cpp
         src/agent/agent_node_registry.cpp
         src/agent/agent_graph_executor.cpp
         src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
+        src/web/web_search_client.cpp
+        src/web/web_search_tool.cpp
+        src/web/web_research_engine.cpp
         src/llm/llm_client.cpp
         src/llm/vision_llm_client.cpp
         include/vpet/agent/agent_context.h
@@ -151,12 +163,16 @@ if(BUILD_TESTING)
         include/vpet/agent/agent_dag_graph.h
         include/vpet/agent/emotion_rewrite_node.h
         include/vpet/agent/proactive_topic_node.h
+        include/vpet/agent/web_research_node.h
         include/vpet/agent/invocation_queue_policy.h
         include/vpet/agent/agent_output_policy.h
         include/vpet/agent/agent_node_registry.h
         include/vpet/agent/agent_graph_executor.h
         include/vpet/agent/agent_async_bridge.h
         include/vpet/agent/agent_runtime.h
+        include/vpet/web/web_search_client.h
+        include/vpet/web/web_search_tool.h
+        include/vpet/web/web_research_engine.h
         include/vpet/llm/llm_client.h
         include/vpet/llm/vision_llm_client.h
     )
@@ -183,12 +199,16 @@ if(BUILD_TESTING)
         src/agent/agent_dag_graph.cpp
         src/agent/emotion_rewrite_node.cpp
         src/agent/proactive_topic_node.cpp
+        src/agent/web_research_node.cpp
         src/agent/invocation_queue_policy.cpp
         src/agent/agent_output_policy.cpp
         src/agent/agent_node_registry.cpp
         src/agent/agent_graph_executor.cpp
         src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
+        src/web/web_search_client.cpp
+        src/web/web_search_tool.cpp
+        src/web/web_research_engine.cpp
         src/llm/llm_client.cpp
         src/llm/vision_llm_client.cpp
         include/vpet/agent/agent_context.h
@@ -196,12 +216,16 @@ if(BUILD_TESTING)
         include/vpet/agent/agent_dag_graph.h
         include/vpet/agent/emotion_rewrite_node.h
         include/vpet/agent/proactive_topic_node.h
+        include/vpet/agent/web_research_node.h
         include/vpet/agent/invocation_queue_policy.h
         include/vpet/agent/agent_output_policy.h
         include/vpet/agent/agent_node_registry.h
         include/vpet/agent/agent_graph_executor.h
         include/vpet/agent/agent_async_bridge.h
         include/vpet/agent/agent_runtime.h
+        include/vpet/web/web_search_client.h
+        include/vpet/web/web_search_tool.h
+        include/vpet/web/web_research_engine.h
         include/vpet/llm/llm_client.h
         include/vpet/llm/vision_llm_client.h
     )
@@ -221,4 +245,78 @@ if(BUILD_TESTING)
     set_property(TARGET application_integration_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
 
     add_test(NAME application_integration_tests COMMAND application_integration_tests)
+
+    add_executable(web_search_client_tests
+        tests/web_search_client_test.cpp
+        src/web/web_search_client.cpp
+        src/web/web_search_tool.cpp
+        include/vpet/web/web_search_client.h
+        include/vpet/web/web_search_tool.h
+    )
+
+    target_include_directories(web_search_client_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(web_search_client_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    set_property(TARGET web_search_client_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME web_search_client_tests COMMAND web_search_client_tests)
+
+    add_executable(web_research_engine_tests
+        tests/web_research_engine_test.cpp
+        src/web/web_search_client.cpp
+        src/web/web_search_tool.cpp
+        src/web/web_research_engine.cpp
+        include/vpet/web/web_search_client.h
+        include/vpet/web/web_search_tool.h
+        include/vpet/web/web_research_engine.h
+    )
+
+    target_include_directories(web_research_engine_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(web_research_engine_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    set_property(TARGET web_research_engine_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME web_research_engine_tests COMMAND web_research_engine_tests)
+
+    add_executable(web_search_daemon_integration_tests
+        tests/web_search_daemon_integration_test.cpp
+        src/web/web_search_client.cpp
+        src/web/web_search_tool.cpp
+        include/vpet/web/web_search_client.h
+        include/vpet/web/web_search_tool.h
+    )
+
+    target_include_directories(web_search_daemon_integration_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    target_link_libraries(web_search_daemon_integration_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            Qt6::Test
+    )
+
+    set_property(TARGET web_search_daemon_integration_tests PROPERTY AUTOMOC_COMPILER_PREDEFINES OFF)
+
+    add_test(NAME web_search_daemon_integration_tests COMMAND web_search_daemon_integration_tests)
 endif()

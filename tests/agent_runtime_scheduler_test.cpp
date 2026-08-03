@@ -1,6 +1,7 @@
 #include "vpet/agent/agent_runtime.h"
 #include "vpet/agent/proactive_topic_node.h"
 #include "vpet/agent/agent_context_keys.h"
+#include "vpet/web/web_research_engine.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -13,6 +14,47 @@
 
 namespace
 {
+
+class ControlledWebResearchEngine : public vpet::WebResearchEngine
+{
+public:
+    ControlledWebResearchEngine()
+        : vpet::WebResearchEngine(nullptr, nullptr)
+        , startCount(0)
+        , activeResearchId(41)
+        , lastRequest()
+    {
+    }
+
+    /** @brief Records a research request without using the network. @param[in] request Research request. @return Fixed research ID. */
+    int Start(const vpet::_tagWebResearchRequest &request) override
+    {
+        if (request.question.trimmed().isEmpty())
+        {
+            return -1;
+        }
+
+        startCount += 1;
+        lastRequest = request;
+        return activeResearchId;
+    }
+
+    /** @brief Emits a controlled completion. @param[in] response Research response. */
+    void Complete(const vpet::_tagWebResearchResponse &response)
+    {
+        emit Completed(response);
+    }
+
+    /** @brief Emits a controlled failure. @param[in] message Error message. */
+    void Fail(const QString &message)
+    {
+        emit Failed(activeResearchId, message, 0);
+    }
+
+    int startCount;
+    int activeResearchId;
+    vpet::_tagWebResearchRequest lastRequest;
+};
 
 bool WriteDagConfig(const QTemporaryDir &temporaryDirectory,
                     const QByteArray &jsonData,
@@ -115,6 +157,11 @@ private slots:
     void SuppressesDuplicateProactiveSummary();
     void SuppressesProactiveSpeechDuringCooldown();
     void DeduplicatesIdenticalPerceptionFrames();
+    void DefersSynchronousWebResearchCompletionUntilPendingRegistration();
+    void IsolatesWebRequestNamespaceAndSerializesResponse();
+    void ContinuesAfterWebResearchFailure();
+    void SkipsWebResearchForVisionTrigger();
+    void RejectsLlmJoinWithoutMergePolicy();
 };
 
 void AgentRuntimeSchedulerTest::ExecutesFanInAfterAllParents()
@@ -1764,5 +1811,229 @@ void AgentRuntimeSchedulerTest::DeduplicatesIdenticalPerceptionFrames()
 }
 
 QTEST_MAIN(AgentRuntimeSchedulerTest)
+
+void AgentRuntimeSchedulerTest::DefersSynchronousWebResearchCompletionUntilPendingRegistration()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"mode":"auto","async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    vpet::WebResearchEngine researchEngine;
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    int sinkCount = 0;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkCount](const vpet::_tagAgentDagNode &node,
+                                                     vpet::AgentContext &context,
+                                                     QString &errorMessage)
+    {
+        (void)context;
+        (void)errorMessage;
+
+        if (node.id == QStringLiteral("sink"))
+        {
+            sinkCount += 1;
+        }
+
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.ExecuteWithUserInput(QStringLiteral("解释 C++ RAII"), errorMessage));
+    QVERIFY(runtime.HasPendingAsyncRequest());
+    QTRY_COMPARE(sinkCount, 1);
+    QTRY_VERIFY(!runtime.HasPendingAsyncRequest());
+
+    QVariant statusValue;
+    QVERIFY(runtime.GetContext().GetValue(
+        vpet::AgentContextKeys::SEMANTIC_WEB_RESEARCH_STATUS,
+        statusValue));
+    QCOMPARE(statusValue.toString(), QStringLiteral("skipped"));
+}
+
+void AgentRuntimeSchedulerTest::IsolatesWebRequestNamespaceAndSerializesResponse()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"mode":"explicit","failure_policy":"continue","async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    ControlledWebResearchEngine researchEngine;
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    int sinkCount = 0;
+    QString downstreamPrompt;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkCount, &downstreamPrompt](
+                                            const vpet::_tagAgentDagNode &node,
+                                            vpet::AgentContext &context,
+                                            QString &errorMessage)
+    {
+        (void)errorMessage;
+        QVariant promptValue;
+
+        if ((node.id == QStringLiteral("sink"))
+            && context.GetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_PROMPT, promptValue))
+        {
+            sinkCount += 1;
+            downstreamPrompt = promptValue.toString();
+        }
+
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.ExecuteWithUserInput(QStringLiteral("/search Qt 6.9 release"), errorMessage));
+    QCOMPARE(researchEngine.startCount, 1);
+    QVERIFY(runtime.HasPendingAsyncRequest());
+
+    QVERIFY(InvokeLlmCompleted(runtime,
+                               researchEngine.activeResearchId,
+                               QStringLiteral("wrong client response")));
+    QCOMPARE(sinkCount, 0);
+    QVERIFY(runtime.HasPendingAsyncRequest());
+
+    vpet::_tagWebResearchResponse response;
+    response.researchId = researchEngine.activeResearchId;
+    response.question = QStringLiteral("Qt 6.9 release");
+    response.needSearch = true;
+    response.status = QStringLiteral("completed");
+    response.reason = QStringLiteral("sufficient_evidence");
+    response.summary = QStringLiteral("Qt 6.9 is documented at https://doc.qt.io/");
+    response.plan.append(QStringLiteral("Qt 6.9 release"));
+    response.queries.append(QStringLiteral("Qt 6.9 release"));
+    response.citations.append(QStringLiteral("Qt Docs - https://doc.qt.io/"));
+    response.roundCount = 1;
+    vpet::_tagWebResearchEvidence evidence;
+    evidence.claim = QStringLiteral("Qt 6.9 release");
+    evidence.sourceTitle = QStringLiteral("Qt Docs");
+    evidence.url = QStringLiteral("https://doc.qt.io/");
+    evidence.publisher = QStringLiteral("doc.qt.io");
+    evidence.snippet = QStringLiteral("Official documentation");
+    evidence.sourceTier = QStringLiteral("official");
+    evidence.freshness = QStringLiteral("current");
+    evidence.confidence = QStringLiteral("high");
+    response.evidence.append(evidence);
+    researchEngine.Complete(response);
+
+    QCOMPARE(sinkCount, 1);
+    QVERIFY(!runtime.HasPendingAsyncRequest());
+    QVERIFY(downstreamPrompt.contains(QStringLiteral("外部不可信数据")));
+    QVERIFY(downstreamPrompt.contains(QStringLiteral("https://doc.qt.io/")));
+    QVariant evidenceValue;
+    QVERIFY(runtime.GetContext().GetValue(
+        vpet::AgentContextKeys::SEMANTIC_WEB_RESEARCH_EVIDENCE,
+        evidenceValue));
+    QVERIFY(evidenceValue.toString().contains(QStringLiteral("source_title")));
+}
+
+void AgentRuntimeSchedulerTest::SkipsWebResearchForVisionTrigger()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"mode":"auto"}},{"id":"user_sink","type":"sink"},{"id":"vision","type":"vision.input","config":{"trigger":"vision"}},{"id":"vision_sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"user_sink"},{"from":"vision","to":"vision_sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    ControlledWebResearchEngine researchEngine;
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    QStringList sinkIds;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkIds](const vpet::_tagAgentDagNode &node,
+                                                   vpet::AgentContext &context,
+                                                   QString &errorMessage)
+    {
+        (void)context;
+        (void)errorMessage;
+        sinkIds.append(node.id);
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.UpdatePerceptionFrame(QByteArrayLiteral("frame-data"),
+                                          1,
+                                          QSize(8, 8),
+                                          QStringLiteral("image/png"),
+                                          errorMessage));
+    QVERIFY(runtime.Execute(errorMessage));
+    QCOMPARE(researchEngine.startCount, 0);
+    QCOMPARE(sinkIds, QStringList({QStringLiteral("vision_sink")}));
+}
+
+void AgentRuntimeSchedulerTest::ContinuesAfterWebResearchFailure()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"failure_policy":"continue","async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    ControlledWebResearchEngine researchEngine;
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    int sinkCount = 0;
+    QString fallbackPrompt;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkCount, &fallbackPrompt](
+                                            const vpet::_tagAgentDagNode &node,
+                                            vpet::AgentContext &context,
+                                            QString &errorMessage)
+    {
+        (void)node;
+        (void)errorMessage;
+        QVariant promptValue;
+
+        if (context.GetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_PROMPT, promptValue))
+        {
+            sinkCount += 1;
+            fallbackPrompt = promptValue.toString();
+        }
+
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.ExecuteWithUserInput(QStringLiteral("/search unavailable fact"), errorMessage));
+    QVERIFY(runtime.HasPendingAsyncRequest());
+    researchEngine.Fail(QStringLiteral("Web search service unavailable."));
+    QCOMPARE(sinkCount, 1);
+    QVERIFY(!runtime.HasPendingAsyncRequest());
+    QVERIFY(fallbackPrompt.contains(QStringLiteral("不得声称已经联网核实")));
+
+    QVariant statusValue;
+    QVERIFY(runtime.GetContext().GetValue(
+        vpet::AgentContextKeys::SEMANTIC_WEB_RESEARCH_STATUS,
+        statusValue));
+    QCOMPARE(statusValue.toString(), QStringLiteral("error"));
+}
+
+void AgentRuntimeSchedulerTest::RejectsLlmJoinWithoutMergePolicy()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"source_a","type":"source"},{"id":"source_b","type":"source"},{"id":"chat","type":"llm.chat"}],"edges":[{"from":"source_a","to":"chat"},{"from":"source_b","to":"chat"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    vpet::AgentRuntime runtime;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("source"),
+                                        [](const vpet::_tagAgentDagNode &node,
+                                           vpet::AgentContext &context,
+                                           QString &errorMessage)
+    {
+        (void)errorMessage;
+        return context.SetValue(QStringLiteral("source.%1").arg(node.id), true);
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(!runtime.Execute(errorMessage));
+    QVERIFY(errorMessage.contains(QStringLiteral("multiple active parents")));
+    QVERIFY(errorMessage.contains(QStringLiteral("merge policy")));
+}
 
 #include "agent_runtime_scheduler_test.moc"

@@ -175,6 +175,11 @@ copy vision_llm_config.example.json vision_llm_config.json
       "config": { "trigger": "user" }
     },
     {
+      "id": "web_research",
+      "type": "web.research",
+      "config": { "mode": "auto", "failure_policy": "continue" }
+    },
+    {
       "id": "call_llm",
       "type": "llm.chat",
       "config": {}
@@ -186,7 +191,8 @@ copy vision_llm_config.example.json vision_llm_config.json
     }
   ],
   "edges": [
-    { "from": "user_input", "to": "call_llm" },
+    { "from": "user_input", "to": "web_research" },
+    { "from": "web_research", "to": "call_llm" },
     { "from": "call_llm", "to": "format_output" }
   ]
 }
@@ -207,6 +213,7 @@ copy vision_llm_config.example.json vision_llm_config.json
 
 ```text
 仅文本对话：user.input → llm.chat → output.format
+显式联网：user.input → web.research → llm.chat → output.format
 视觉主动发话：vision.input → vision.llm → proactive.topic → llm.chat → output.format
 带情感改写：user.input → llm.chat → emotion.rewrite → output.format
 完整默认链路：vision.input → vision.llm → proactive.topic → llm.chat → emotion.rewrite → output.format
@@ -220,6 +227,7 @@ copy vision_llm_config.example.json vision_llm_config.json
 | `vision.input` | 视觉输入触发源 | 最新截图、帧尺寸、帧 ID | 设置 `trigger: "vision"`；写入 `semantic.image.*` 和 `semantic.vision.*` |
 | `vision.llm` | 调用视觉 LLM 生成屏幕摘要 | `semantic.image.base64`、媒体类型和尺寸 | 输出 `semantic.vision.summary`；可配置 `prompt` |
 | `proactive.topic` | 判断是否允许主动发话并组装提示词 | `semantic.vision.summary` | 输出 `semantic.proactive.*`、`semantic.text.prompt`；可配置 `enabled`、`instruction`、`min_interval_ms`、`dedup_window_ms` |
+| `web.research` | 受预算限制的联网研究 | `semantic.text.prompt` | 输出 invocation-local 的 `semantic.web.research.*` 并重组 `semantic.text.prompt`；默认 `mode=auto`（按检索决策规则判断，`/search` 等显式触发词始终强制检索），失败策略为 `continue` |
 | `llm.chat` | 调用文本 LLM | `semantic.text.prompt` | 输出 `semantic.text.response`；配置可扩展，通常使用 `{}` |
 | `emotion.rewrite` | 根据对话上下文总结情绪并改写回复 | `semantic.text.response`、`conversation.history` | 输出情绪标签和改写后的 `semantic.text.response`；无历史时可透传 |
 | `output.format` | 生成最终输出并维护对话历史 | `semantic.text.response` | 输出 `semantic.text.final`、`semantic.output.source`；无输出且主动策略拒绝时静默结束 |
@@ -269,7 +277,7 @@ conversation.history      对话历史
 
 ## 使用
 
-1. 配置 `llm_config.json`、`vision_llm_config.json`（及可选 TTS）
+1. 配置 `llm_config.json`、`vision_llm_config.json`；需要联网研究时，将 `web_search_config.example.json` 复制为被 Git 忽略的 `web_search_config.json`（及可选 TTS）
 2. 启动 `VPet`
 3. 桌宠出现在屏幕上：
    - **左键拖动**：提起/移动
@@ -292,6 +300,7 @@ conversation.history      对话历史
 | `semantic.text.response` | 中间回复 |
 | `semantic.text.final` | 最终回复 |
 | `semantic.output.source` | `user_response` / `vision_proactive` |
+| `semantic.web.research.*` | 当前 invocation 的研究计划、证据、冲突、引用和状态；不跨轮持久化 |
 | `runtime.trigger.type` | `user` / `vision` |
 
 一轮结束后会清理本轮 `user.input`、提示词端口和触发类型；`conversation.history` 持久保留。主动发话历史可只记录 `assistant:`，不伪造用户输入。

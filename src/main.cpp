@@ -160,6 +160,12 @@ int main(int argc, char *argv[])
                    << "Vision LLM DAG node will be skipped before request.";
     }
 
+    if (!agentRuntime.LoadDefaultWebSearchConfig(agentErrorMessage))
+    {
+        qWarning() << "[Agent]" << agentErrorMessage
+                   << "Web research requests will fail according to the DAG failure policy.";
+    }
+
     const QString agentDagConfigPath = FindAgentDagConfigPath();
 
     if (agentDagConfigPath.isEmpty())
