@@ -1,396 +1,149 @@
-# VPet 项目整体开发报告
+# VPet 项目当前开发报告
 
-## 1. 项目概述
+更新日期：2026-08-04
 
-VPet 当前是一个基于 Qt 6 / C++17 的桌面宠物应用。项目已经具备基础桌宠渲染、动画状态机、鼠标交互、TTS 语音、聊天气泡、自动截图感知和纯文本 LLM HTTP 客户端模块。
+本文档按当前工作树和 `HEAD` 提交 `ae173a9` 更新。早期“尚未实现 Agent Runtime”“截图仍由 MainWindow 直接管理”“CTest 只有少量目标”等结论已经过时；历史过程请查看 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)。
 
-当前开发方向已经从单纯桌宠动画系统扩展为具备 Agent 能力的桌面伴随应用。根据 `vpet.md` 和 `FRAMEWORK.md`，后续目标是实现一个配置驱动的节点化 Agent 框架，支持被动用户输入和主动环境感知两种触发模式。
+## 1. 项目概况
 
-## 2. 当前代码结构
+VPet 是基于 Qt 6 / C++17 的 Windows 桌面宠物应用，当前主路径包括：
 
-### 2.1 构建系统
+- PNG 序列帧动画、状态机、拖拽和触摸交互。
+- 气泡输出、语音输入和本地 GPT-SoVITS TTS。
+- `PerceptionPipeline` 驱动的定时截图、处理链、环形帧缓冲和 Base64 编码。
+- 配置驱动的 Agent DAG，支持用户输入和视觉感知两类触发。
+- 文本 LLM、视觉 LLM、受预算限制的联网研究和情绪改写节点。
+- CTest 单元/集成测试，以及本地 open-webSearch daemon 的受控集成测试。
 
-项目使用 `CMakeLists.txt` 管理构建，目标为单个 Qt 可执行程序 `VPet`。
+产品仍未完成情绪到动画的闭环、分层记忆、流式 LLM、工具调用循环和更细粒度的主动打扰控制。这些是明确的后续能力，不应再被描述为当前已实现功能。
 
-已启用模块：
+## 2. 构建与测试
 
-- `Qt6::Core`
-- `Qt6::Gui`
-- `Qt6::Widgets`
-- `Qt6::Network`
-- `Qt6::Multimedia`
+构建系统使用 CMake，目标为 `VPet`，C++ 标准为 C++17，启用 Qt 的 `Core`、`Gui`、`Widgets`、`Network`、`Multimedia`，测试额外使用 `Qt6::Test`。
 
-当前构建标准为 C++17，启用了 `CMAKE_AUTOMOC`，适合 QObject 派生类和 Qt signals/slots。
+应用源文件已拆分为动画、感知、语音、LLM、web 和 agent 子目录。Agent Runtime 的实现分为：
 
-### 2.2 源码目录
+- `agent_runtime.cpp`：生命周期、配置加载、公开入口和上下文访问。
+- `agent_runtime_nodes.cpp`：默认节点处理器和输出策略。
+- `agent_runtime_scheduler.cpp`：ready queue、pending 登记、invocation 排队和恢复。
+- `agent_runtime_async.cpp`：文本、视觉和 web 异步回调处理。
+- `agent_runtime_internal.h`：运行时内部常量和共享辅助定义。
 
-主要目录如下：
+当前 CTest 目标为 6 个：
 
-- `include/vpet/`：公共头文件
-- `src/`：模块实现文件
-- `src/perception/`：视觉编码模块
-- `src/sensor/`：自动截图传感器
-- `src/llm/`：纯文本 LLM HTTP 客户端
-- `GPT-SoVITS/`：TTS 服务相关外部组件
-- `docs/`：已有设计或集成文档
+1. `agent_dag_graph_tests`
+2. `agent_runtime_scheduler_tests`
+3. `application_integration_tests`
+4. `web_search_client_tests`
+5. `web_research_engine_tests`
+6. `web_search_daemon_integration_tests`
 
-## 3. 已实现模块
-
-### 3.1 应用启动与窗口模块
-
-相关文件：
-
-- `src/main.cpp`
-- `src/main_window.h`
-- `src/main_window.cpp`
-
-职责：
-
-- 创建 `QApplication`
-- 显示启动画面
-- 启动并等待 TTS 服务状态
-- 初始化 `MainWindow`
-- 初始化动画资源路径
-- 管理桌宠窗口、聊天气泡窗口和自动截图传感器
-
-当前实现特点：
-
-- 启动阶段有 TTS 服务等待逻辑和安全超时
-- 主窗口透明、无边框、置顶、不抢焦点
-- 主窗口只做 UI 展示和事件转发，不直接管理动画状态细节
-
-### 3.2 动画资源模块
-
-相关文件：
-
-- `include/vpet/animation_frame.h`
-- `include/vpet/animation_segment.h`
-- `include/vpet/animation_clip.h`
-- `include/vpet/animation_resource_manager.h`
-- `src/animation_frame.cpp`
-- `src/animation_segment.cpp`
-- `src/animation_clip.cpp`
-- `src/animation_resource_manager.cpp`
-
-职责：
-
-- 加载 PNG 序列帧资源
-- 按动作名称、情绪、分段类型组织动画资源
-- 支持 ABC 三段式动画结构
-- 为状态机提供当前动作对应的动画剪辑
-
-当前实现特点：
-
-- 资源管理与状态机分离
-- 状态机通过动作名请求动画，不直接扫描文件系统
-- 支持情绪变体回退机制
-
-### 3.3 状态机模块
-
-相关文件：
-
-- `include/vpet/pet_state_machine.h`
-- `src/pet_state_machine.cpp`
-
-职责：
-
-- 管理桌宠顶层状态
-- 实现 Idle、Walking、Saying、TouchHead、TouchBody、Dragging 状态
-- 实现优先级抢占规则
-- 实现 A_START、B_LOOP、C_END、SINGLE 动画段自动流转
-
-当前实现特点：
-
-- 状态数量较少，符合轻量状态机设计
-- 高优先级状态可抢占低优先级状态
-- `SAYING` 状态与 TTS 合成结果配合，避免动画先播、音频后到的错位问题
-
-代码风险：
-
-- `PetStateMachine::Update()` 只在单次调用中推进一帧。如果 `deltaTimeMs` 远大于当前帧时长，动画不会追帧，可能导致低帧率或卡顿后动画速度变慢。
-- `GetCurrentFrame()` 返回静态无效帧对象，当前可用，但后续若引入多线程读取需要重新评估线程安全。
-
-### 3.4 控制器模块
-
-相关文件：
-
-- `include/vpet/pet_controller.h`
-- `src/pet_controller.cpp`
-
-职责：
-
-- 连接 UI 鼠标事件和状态机事件
-- 管理桌宠位置、拖拽、边界限制和命中区域
-- 管理交互气泡文本
-- 管理 TTS 文本选择、音频合成、播放和状态机 SAYING 流程
-
-当前实现特点：
-
-- 控制器承担桌宠核心运行时协调职责
-- TTS 与 SAYING 状态的顺序已经修正为先合成音频、再进入 SAYING 状态
-- 交互事件和状态机分离较清晰
-
-代码风险：
-
-- `PetController` 当前职责较多，已经同时承担状态调度、位置控制、TTS、气泡和音频路径管理。后续接入 Agent 后不建议继续扩大该类职责。
-- TTS 配置查找逻辑写在 `PetController::Initialize()` 内，后续可抽出统一配置查找工具，避免 LLM 配置查找重复实现。
-
-### 3.5 TTS 模块
-
-相关文件：
-
-- `include/vpet/tts_client.h`
-- `src/tts_client.cpp`
-- `include/vpet/tts_audio_player.h`
-- `src/tts_audio_player.cpp`
-- `include/vpet/tts_server_manager.h`
-- `src/tts_server_manager.cpp`
-
-职责：
-
-- 管理 GPT-SoVITS 服务进程
-- 发送 TTS HTTP 请求
-- 保存返回的 WAV 音频
-- 播放合成音频
-
-当前实现特点：
-
-- TTS 服务启动有健康检查和超时保护
-- TTS 请求异步执行
-- 音频播放结束后通知状态机退出 SAYING 循环
-
-代码风险：
-
-- `TtsClient` 中仍有较多调试日志，适合当前调试阶段，但正式版本应降低日志量或加日志级别开关。
-- TTS 配置包含本地服务路径和参考音频路径，部署时需要明确目录约定。
-
-### 3.6 视觉感知模块
-
-相关文件：
-
-- `include/vpet/sensor/screenshot_sensor.h`
-- `src/sensor/screenshot_sensor.cpp`
-- `include/vpet/perception/vision_encoder.h`
-- `src/perception/vision_encoder.cpp`
-
-职责：
-
-- 定时抓取屏幕图像
-- 将截图编码为 PNG/JPG 字节流
-- 将图像编码为 Base64，供后续发送到 LLM 或 Agent 节点
-- 可选支持多屏拼接和保存到磁盘
-
-当前实现特点：
-
-- `ScreenshotSensor` 与 UI 动画系统低耦合
-- `VisionEncoder` 独立负责图像编码
-- 默认不保存截图到磁盘，降低隐私风险和 IO 开销
-- 主窗口启动后默认每 3000ms 截图一次，并通过 `PerceptionReceived` 信号输出 Base64
-
-代码风险：
-
-- 自动截图当前直接在 `MainWindow` 中创建，后续应迁移到 Agent 模块或 PerceptionPipeline。
-- 截图功能当前没有可视化调试开关。默认不打成功日志是合理的，但开发阶段需要额外工具确认定时输出。
-- `FRAMEWORK.md` 中规划的 `FrameBuffer` 和 `PerceptionPipeline` 尚未落地。
-
-### 3.7 纯文本 LLM 客户端模块
-
-相关文件：
-
-- `include/vpet/llm/llm_client.h`
-- `src/llm/llm_client.cpp`
-- `llm_config.example.json`
-
-职责：
-
-- 通过 OpenAI-compatible `/chat/completions` 接口发送纯文本消息
-- 支持单轮 prompt 和多轮 messages
-- 异步返回模型文本回复
-- 统一处理网络错误、HTTP 错误和 JSON 解析错误
-
-当前实现特点：
-
-- `base_url`、`api_key`、`model` 均从配置文件读取
-- 不支持多模态，不处理图像输入
-- 不直接接入 UI，不直接接入截图模块
-- 使用 `QNetworkAccessManager` 和 signals/slots 保持 Qt 异步模型
-- 使用 `qScopeGuard` 管理 `QNetworkReply::deleteLater()` 调用
-
-代码风险：
-
-- 当前只有 `llm_config.example.json`，还没有指定正式配置文件名和自动加载路径。
-- API Key 放在配置文件中会带来泄漏风险，仓库应避免提交真实 `llm_config.json`。
-- 当前只支持非流式请求，暂不支持 SSE 流式输出。
-- 当前没有请求取消、并发请求上限、速率限制退避机制。
-
-## 4. Agent 方向进度
-
-根据 `vpet.md`，后续 Agent 架构目标是配置驱动的 DAG 节点编排引擎。当前代码已经完成了两个关键底座模块：
-
-- 主动输入底座：`ScreenshotSensor` + `VisionEncoder`
-- 文本推理底座：`LlmClient`
-
-尚未完成的 Agent 核心：
-
-- Agent 模块注册中心
-- 节点接口定义
-- DAG 配置解析
-- 拓扑排序执行器
-- 上下文记忆模块
-- 情感分析节点
-- 用户画像固化模块
-- LLM 节点封装
-- 截图节点封装
-- 错误降级和条件路由机制
-
-## 5. 配置文件状态
-
-当前已有配置或模板：
-
-- `tts_config.json`：TTS 实际配置文件
-- `llm_config.example.json`：LLM 配置模板
-
-当前缺失：
-
-- `llm_config.json`：LLM 实际配置文件
-- LLM 配置自动查找逻辑
-- Agent DAG 配置文件
-- 用户画像存储配置
-
-建议下一步确定：
-
-- LLM 默认配置文件名使用 `llm_config.json`
-- 配置查找顺序与 TTS 保持一致
-- 将真实 `llm_config.json` 加入 `.gitignore`
-
-## 6. 代码规范审查摘要
-
-### 6.1 总体评价
-
-当前新增模块整体遵守了项目 C++ 代码规范：
-
-- 模块已拆分为独立头文件和源文件
-- 自定义结构体使用 `_tag` 前缀
-- 枚举类型使用全大写和下划线
-- 关键函数声明有注释说明功能、参数和返回值
-- 动态资源大多通过 QObject 父子关系托管
-- 新增 LLM 模块没有硬编码真实敏感数据
-- 新增截图模块默认不落盘，降低隐私风险
-
-### 6.2 主要待改进点
-
-#### 1. `PetController` 职责过重
-
-严重程度：中
-
-影响：后续继续接入 Agent 后，`PetController` 可能变成上帝类。
-
-建议：将 TTS 流程、Agent 流程、配置查找流程拆为独立模块或服务类。
-
-#### 2. LLM 配置尚未自动加载
-
-严重程度：中
-
-影响：模块已经实现，但程序启动后不会自动读取 `llm_config.json`。
-
-建议：实现 `LlmConfigLocator` 或通用配置查找函数，并在 Agent 初始化阶段加载。
-
-#### 3. 自动截图当前接入位置临时
-
-严重程度：中
-
-影响：截图已能运行，但从架构上应属于 Agent/PerceptionPipeline，不应长期由 `MainWindow` 管理。
-
-建议：实现 `PerceptionPipeline` 后，将 `ScreenshotSensor` 从 `MainWindow` 迁移出去。
-
-#### 4. 缺少自动化测试
-
-严重程度：中
-
-影响：构建已验证，但缺少单元测试覆盖 JSON 解析、边界参数、HTTP 响应解析。
-
-建议：引入 Qt Test 或轻量测试目标，优先测试 `LlmClient` JSON 解析和 `VisionEncoder` 编码。
-
-#### 5. TTS 调试日志偏多
-
-严重程度：低
-
-影响：正式运行时输出噪声较大，可能影响问题定位。
-
-建议：引入日志级别或编译期开关。
-
-## 7. 验证情况
-
-最近已完成的验证：
-
-- 使用 Qt 6.9.2 MinGW 64-bit 构建通过
-- `VPet.exe` 成功链接
-- `git diff --check` 无空白错误
-- LLM 模块在无真实 API Key 的情况下完成编译级验证
-- 截图模块完成编译级验证，并已接入主窗口启动流程
-
-构建命令：
+Windows 下应运行：
 
 ```powershell
-$env:PATH = "E:\Qt\Tools\mingw1310_64\bin;E:\Qt\Tools\Ninja;E:\Qt\Tools\CMake_64\bin;E:\Qt\6.9.2\mingw_64\bin;$env:PATH"
-& "E:\Qt\Tools\CMake_64\bin\cmake.exe" --build "F:\Pet Agent\build\opencode-screenshot"
+.\scripts\Run-Tests.ps1
 ```
 
-未完成验证：
+脚本会根据构建目录的 `CMakeCache.txt` 为 CTest 子进程补齐 Qt 和匹配 MinGW 的运行时路径。直接运行 CTest 如果出现 `0xc0000135`，通常是 Qt DLL 未在 `PATH` 中，而不是测试逻辑失败。
 
-- 未使用真实 LLM API Key 做端到端请求验证
-- 未用真实 `llm_config.json` 验证启动加载
-- 未做长时间截图稳定性测试
-- 未做 TTS 服务缺失时的完整降级体验测试
+## 3. 当前架构
 
-## 8. Git 状态
+```text
+截图 -> PerceptionPipeline -> MainWindow -> AgentRuntime
+语音/文本 -------------------------------> AgentRuntime
 
-近期关键提交：
+AgentRuntime
+  -> AgentGraphExecutor
+  -> AgentNodeRegistry
+  -> AgentAsyncBridge
+  -> InvocationQueuePolicy
+  -> LlmClient / VisionLlmClient / WebResearchEngine
+  -> AgentOutputReady -> MainWindow -> 气泡 / TTS / 动画
+```
 
-- `7313fd4 Add automatic screenshot sensor`
-- `599ecab Add text LLM client`
-- `e88a969 Read LLM credentials from config`
+`AgentGraphExecutor` 负责触发源裁剪、拓扑调度、分支上下文和 Join；`AgentNodeRegistry` 按节点类型分发处理器；`AgentAsyncBridge` 按 `clientType:requestId` 关联异步回调。Runtime 同一时刻只执行一个 invocation，用户输入在活动轮次期间 FIFO 排队，视觉输入使用 latest-wins。
 
-当前工作区存在未提交文件或改动：
+Invocation 以 session context 为基座，各分支保存本轮增量。Join 对冲突 key 默认报错，可通过 `config.merge` 使用 `prefer_user`、`prefer_vision` 或 `concat`。失败轮次不会提交本轮上下文，成功轮次目前只提交允许持久化的 `conversation.history`。
 
-- `CMakeLists.txt.user`
-- `vpet.md`
-- `FRAMEWORK.md`
-- `情感.md`
-- `通用的llmapi的调用方法.md`
+## 4. 已实现模块
 
-这些文件目前不是本报告生成前的已提交功能变更，其中 `CMakeLists.txt.user` 属于 Qt Creator 用户配置，不建议纳入版本控制。
+### 4.1 桌宠 UI、动画和 TTS
 
-## 9. 后续开发建议
+`MainWindow` 管理窗口和用户事件，`PetController` 管理桌宠状态、位置、气泡、TTS 和音频播放。TTS 服务由 `TtsServerManager` 启动和健康检查，`TtsClient` 发送 HTTP 合成请求，`TtsAudioPlayer` 使用 Qt 多媒体播放音频。TTS 不可用时仍可显示文字气泡。
 
-### 9.1 近期优先级
+### 4.2 视觉感知
 
-1. 确定并实现 `llm_config.json` 自动查找。
-2. 将真实 `llm_config.json` 加入 `.gitignore`。
-3. 建立 `Agent` 或 `AgentRuntime` 基类，统一管理 LLM、截图、TTS 等模块生命周期。
-4. 实现 LLM 节点封装，让 `LlmClient` 成为节点执行器的底层客户端。
-5. 实现最小上下文管理，支持用户输入和模型回复的多轮消息缓存。
+`PerceptionPipeline` 已替代 MainWindow 直接管理截图传感器的早期实现。它组合 `ScreenshotSensor`、`FrameBuffer`、`VisionEncoder` 和可选处理器链，启用后按 3 秒间隔产生 PNG Base64 数据。屏幕感知是右键菜单开启的隐私 opt-in，启动时默认关闭。MainWindow 将 `DataReady` 转发到 `AgentRuntime::UpdatePerceptionFrame`。
 
-### 9.2 中期目标
+当前去重为编码内容 SHA-256；未实现感知级相似度检测。默认不保存截图到磁盘。
 
-1. 实现 DAG 配置解析和拓扑执行。
-2. 实现被动文本输入链路：用户输入到 LLM 到气泡和 TTS 输出。
-3. 实现主动截图链路：截图到视觉分析节点到反馈策略。
-4. 实现情感分析和用户画像固化模块。
-5. 实现统一错误降级策略。
+### 4.3 Agent DAG Runtime
 
-### 9.3 工程质量目标
+当前默认 DAG 为：
 
-1. 引入测试目标，覆盖 LLM 响应解析、配置校验和图像编码。
-2. 拆分 `PetController` 中的 TTS 流程。
-3. 抽象通用配置查找工具。
-4. 给自动截图增加开发期观测方式，例如可配置保存最近一帧。
-5. 建立发布模式日志策略。
+```text
+user.input -> web.research -> llm.chat -> emotion.rewrite -> output.format
+vision.input -> vision.llm -> proactive.topic -> llm.chat
+```
 
-## 10. 结论
+Runtime 启动时自动加载 `llm_config.json`、`vision_llm_config.json` 和 `web_search_config.json`。DAG 未找到或可选配置缺失时只记录 warning，不阻塞桌宠启动。
 
-项目当前已经从基础桌宠进入 Agent 能力搭建阶段。桌宠动画、交互、TTS、截图感知和文本 LLM 调用底座已经分别落地，模块边界总体清晰。
+当前默认节点：
 
-当前最大缺口不是单点能力，而是 Agent Runtime：需要一个统一的模块注册、配置加载、节点编排和上下文管理层，把已经实现的 `ScreenshotSensor`、`VisionEncoder`、`LlmClient`、TTS 和 UI 输出串成完整闭环。
+| 节点 | 当前职责 |
+|---|---|
+| `user.input` | 用户触发源 |
+| `vision.input` | 校验和同步视觉帧 |
+| `vision.llm` | 视觉摘要异步请求 |
+| `proactive.topic` | 冷却、摘要去重和主动话题提示词 |
+| `web.research` | 自动/显式联网研究、证据和引用上下文 |
+| `llm.chat` | 文本 LLM 请求，支持 `temperature`、`top_p`、`frequency_penalty`、`presence_penalty`、`max_tokens` 校验 |
+| `emotion.rewrite` | 情绪标签和回复改写 |
+| `output.format` | 最终输出、来源和会话历史 |
 
-建议下一阶段先完成 `llm_config.json` 自动加载和最小文本对话链路，再推进 DAG 节点编排。这样可以最快验证桌宠从“动画交互”升级到“可对话 Agent”的核心体验。
+节点间跨模块数据使用 `semantic.*` 和 `node.*` key，协议详见 [AGENT_CONTEXT_KEY_PROTOCOL.md](AGENT_CONTEXT_KEY_PROTOCOL.md)。
+
+### 4.4 联网研究
+
+`WebResearchEngine` 实现 `Decide -> Search -> Observe -> Assess -> Repeat / Compose` 状态机，默认最多 3 轮、每轮最多 2 个 query、最多 8 条结果、15 秒总预算和 6000 字符 Compose 上下文。研究结果只属于当前 invocation，外部标题、摘要和 URL 按不可信数据处理。
+
+底层 `WebSearchClient` 只访问本地 daemon 的 `POST /search`。当前默认 daemon 为回环地址 `127.0.0.1:3210`，引擎为 Bing `request` 模式；daemon 不可用时默认 `failure_policy=continue` 降级为普通对话并保留限制说明。
+
+## 5. 配置状态
+
+| 文件 | 用途 | Git 状态 |
+|---|---|---|
+| `agent_dag_structure.json` | 默认 Agent DAG | 跟踪 |
+| `agent_dag_structure.example.json` | DAG 示例 | 跟踪 |
+| `llm_config.example.json` | 文本 LLM 模板 | 跟踪 |
+| `vision_llm_config.example.json` | 视觉 LLM 模板 | 跟踪 |
+| `web_search_config.example.json` | 搜索客户端模板 | 跟踪 |
+| `llm_config.json` | 文本 LLM 实际配置 | Git 忽略 |
+| `vision_llm_config.json` | 视觉 LLM 实际配置 | Git 忽略 |
+| `web_search_config.json` | 搜索实际配置 | Git 忽略 |
+| `tts_config.json` | 本地 TTS 配置 | 当前跟踪，部署前应检查个人路径和文本 |
+
+配置查找通常覆盖可执行文件目录、当前工作目录和项目上级目录。真实 API key 不应提交到仓库。
+
+## 6. 当前限制与风险
+
+- `PetController` 仍承担较多 UI、状态和 TTS 协调职责。
+- 文本和视觉 LLM 客户端尚无 SSE 流式输出、通用重试/退避、请求取消和并发上限。
+- 主动发话只有固定冷却和摘要指纹去重，还没有用户忙碌、播放中和专注模式判断。
+- 情绪标签尚未驱动动画状态；现有动画资产和自由标签之间缺少稳定映射。
+- 会话历史是当前已持久化的主要 session 数据，尚无 working/semantic/episodic 分层记忆和磁盘 checkpoint。
+- 当前没有通用 tool-calling 循环；联网研究是固定预算的专用节点内部状态机。
+- 项目暂无 CI 配置，跨机器构建仍依赖本地 Qt/CMake 环境。
+
+## 7. 验证状态
+
+最近的 `ae173a9` 已包含 Agent Runtime 拆分、调度加固、测试脚本和回归测试。本次文档同步后已在隔离的 `build/doc-validation` 目录重新配置并构建，`scripts/Run-Tests.ps1 -BuildDirectory build/doc-validation` 运行 CTest 6/6 通过；`git diff --check` 未发现空白错误。
+
+## 8. 后续建议
+
+1. 为 CMake/Qt/CTest 建立 Windows CI，减少本地环境差异。
+2. 将 TTS 配置模板化，并明确公开仓库中的许可证和资源分发边界。
+3. 在现有异步桥上增加可取消请求和有限退避策略。
+4. 为主动策略增加用户忙碌、播放中和专注模式输入。
+5. 在不破坏无环 DAG 约束的前提下评估受限 tool-calling 节点。
+6. 根据资产和产品决策补充情绪到动画的稳定映射，再实现动画联动。

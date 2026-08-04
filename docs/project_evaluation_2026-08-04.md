@@ -118,3 +118,9 @@
 - **值得继续投入**：架构骨架与工程习惯是可持续的，测试与文档基础让后续演进风险可控
 - **优先级排序**：先提交 WIP 并补 CI（防回归）→ 工具调用循环（能力升级）；情感→动画按用户决策推迟
 - 当前不构成阻塞性缺陷，P0 只有"提交 WIP"和"测试环境兜底"两项
+
+## 8. 后续状态校正
+
+本报告生成后，`ae173a9 Harden agent runtime scheduling and test setup` 已提交到 `master`，因此第 2.1 节和第 4 节中关于“工作树 WIP 未提交”的描述仅代表本报告评审时点，不再代表当前仓库状态。
+
+同一提交已落地 `scripts/Run-Tests.ps1`，用于从 CMake 缓存推导 Qt/MinGW 运行时路径并运行 CTest；因此 Windows 命令行的 DLL 环境兜底已具备。当前文档现状以 `PROJECT_DEVELOPMENT_REPORT.md`、`FRAMEWORK.md` 和 `Structure.md` 为准，历史评审中的其他 P1/P2 风险仍然有效。

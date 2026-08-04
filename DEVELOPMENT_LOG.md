@@ -2340,3 +2340,28 @@ P0 四项已全部收敛：
 
 - CTest 6/6 通过，全量增量构建无错误。
 - 单元测试用 `RegisterNodeHandler` 覆盖 `llm.chat` 节点，无法直接断言真实节点路径；按既有先例（如 MiMo 字段选择函数）以源码复核 + 全量回归验证。
+
+## 2026-08-04 文档同步
+
+本轮根据当前源码和 `ae173a9` 之后的提交状态，更新过时的设计与开发现状文档。
+
+修改文件：
+
+- `FRAMEWORK.md`
+- `Structure.md`
+- `PROJECT_DEVELOPMENT_REPORT.md`
+- `docs/project_evaluation_2026-08-04.md`
+
+同步内容：
+
+- 将视觉感知说明更新为当前的 `PerceptionPipeline -> MainWindow -> AgentRuntime` 链路。
+- 将 Agent 架构更新为 `AgentGraphExecutor`、`AgentNodeRegistry`、`AgentAsyncBridge`、队列策略和分支上下文模型。
+- 将默认 DAG、web.research、配置加载、6 个 CTest 目标和 Windows 测试脚本写入当前报告。
+- 明确保留的限制：流式/取消/重试、分层记忆、tool-calling、情绪到动画和高级主动打扰控制尚未闭环。
+- 历史开发条目和历史评审结论保持原样，只为 2026-08-04 的 WIP 状态补充当前提交后的说明。
+
+验证结果：
+
+- 使用 Qt 6.9.2、MinGW 13.1 和 Ninja 在 `build/doc-validation` 完成隔离配置与 `VPet` 构建。
+- 执行 `scripts/Run-Tests.ps1 -BuildDirectory build/doc-validation`，CTest 6/6 通过；daemon 集成测试正常完成。
+- `git diff --check` 未发现新增空白错误。

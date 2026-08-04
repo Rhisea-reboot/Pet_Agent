@@ -1,368 +1,102 @@
-# Pet Agent 视觉感知框架
+# VPet 视觉感知框架
 
-## 设计原则
+本文档描述当前已经落地的视觉感知链路。早期设计中的 `IModule`、统一 `Agent` 模块中心和独立 CLI 示例尚未作为主路径实现；当前应用使用 `MainWindow` 持有 `PerceptionPipeline`，并将编码帧交给 `AgentRuntime`。
 
-- **无 UI 依赖**：仅使用 QtCore + QtGui
-- **纯后台运行**：QTimer 驱动，无窗口
-- **模块化**：可插拔感知器，统一接口
-- **数据流**：屏幕 → 帧缓冲 → 编码器 → Agent
+## 设计边界
 
----
+- 使用 Qt 6 的 `Gui`、`Core` 能力，不依赖额外视觉服务即可完成截图和编码。
+- 感知模块由 Qt 事件循环和 `QTimer` 驱动，不创建独立线程。
+- 截图默认只保存在内存中，不落盘。
+- `PerceptionPipeline` 负责截图、处理、缓冲和编码；`AgentRuntime` 负责视觉 DAG 和视觉 LLM 请求。
+- 感知帧在进入 Runtime 前按编码数据计算 SHA-256；相同内容的帧会被丢弃，当前不是感知级相似度去重。
 
-## 模块划分
+## 当前模块
 
-```
-┌─────────────────────────────────────────────┐
-│  Agent（核心）                                │
-│  - 模块注册中心                                │
-│  - 生命周期管理                                │
-│  - 配置中心                                   │
-└──────────────────┬──────────────────────────┘
-                   │ owns
-                   ▼
-┌─────────────────────────────────────────────┐
-│  PerceptionPipeline（感知管道）               │
-│  - 协调传感器、缓冲、编码、输出                 │
-│  - 支持中间件处理链                            │
-└──────┬──────────────────┬───────────────────┘
-       │ owns             │ owns
-       ▼                  ▼
-┌──────────────┐  ┌──────────────┐
-│  Sensor      │  │  FrameBuffer │
-│  (ISensor)   │  │  (环形缓冲)   │
-└──────┬───────┘  └──────────────┘
-       │
-       ▼
-┌──────────────┐
-│ VisionEncoder│
-│ (图像编码)    │
-└──────────────┘
+```text
+MainWindow
+    |
+    | owns
+    v
+PerceptionPipeline
+    | owns                         signals DataReady
+    +--> ScreenshotSensor ------------------------+
+    |                                             |
+    +--> image processor chain                    v
+    +--> FrameBuffer                         AgentRuntime
+    +--> VisionEncoder                    vision.input
+                                                  |
+                                                  v
+                                            vision.llm
 ```
 
----
+### ScreenshotSensor
 
-## 接口定义
+`ScreenshotSensor` 使用 `QTimer` 定时截取主屏幕，或按配置拼接所有屏幕。默认配置为每 3000 ms 一帧、PNG、内存模式和无限帧数。它提供 `Start()`、`Stop()`、`CaptureOnce()`、最新帧访问和 `FrameCaptured`/`ErrorOccurred` 信号。
 
-### 1. IModule — 模块基类
+关键配置字段：
 
-所有 Agent 模块继承此接口。
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `intervalMs` | `3000` | 截图间隔，最小值由配置归一化逻辑保证 |
+| `maxFrames` | `-1` | 最大帧数，`-1` 表示不限 |
+| `captureAllScreens` | `false` | 是否拼接多屏 |
+| `saveToDisk` | `false` | 是否保存截图文件 |
+| `imageFormat` | `PNG` | 输出图像格式 |
+| `quality` | `-1` | 使用 Qt 默认图像质量 |
+| `autoStart` | `false` | 由管道强制关闭，避免信号连接前提前截图 |
+
+### FrameBuffer
+
+`FrameBuffer` 是容量受限的环形缓冲，保存 `_tagFrame`：图像、UTC 时间戳、序列号和可选文件路径。容量会归一化到 `1..4096`，读取接口按“0 为最新帧”约定提供 `GetLatest()`、`GetAt()`、`GetRecent()` 和 `StitchRecent()`。
+
+### VisionEncoder
+
+`VisionEncoder` 将 `QPixmap` 编码为原始 PNG/JPEG、Base64 PNG/JPEG、灰度或 RGB 数据，并支持尺寸限制、保持宽高比和 JPEG 质量选项。应用主路径默认使用 Base64 PNG。
+
+### PerceptionPipeline
+
+管道构造时组合 `ScreenshotSensor` 和 `FrameBuffer`，可注册多个 `Processor`。每次截图完成后的处理顺序固定为：
+
+```text
+ScreenshotSensor
+    -> latest QPixmap
+    -> Processor chain
+    -> FrameBuffer (optional)
+    -> VisionEncoder
+    -> DataReady(encodedData, frameId)
+    -> MainWindow::OnPerceptionDataReady
+    -> AgentRuntime::UpdatePerceptionFrame
+```
+
+启用缓冲时，管道还发出按最新到最旧排列的 `BatchReady`。空帧、无效尺寸、处理器返回空图像、编码失败等情况统一通过 `ErrorOccurred` 上报。
+
+## 与 AgentRuntime 的连接
+
+`MainWindow` 在初始化时创建管道，配置为 3000 ms 截图间隔、PNG 编码和容量为 5 的缓冲。屏幕感知默认关闭，用户在右键菜单主动启用后才会启动管道。管道的 `DataReady` 连接到窗口层，窗口层读取最新尺寸并调用：
 
 ```cpp
-class IModule : public QObject {
-    virtual QString name() const = 0;      // 模块标识名
-    virtual QString version() const = 0;  // 版本号
-    virtual void initialize();              // 初始化
-    virtual void shutdown();                // 清理
-};
+agentRuntime->UpdatePerceptionFrame(encodedData,
+                                    frameId,
+                                    frameSize,
+                                    QStringLiteral("image/png"),
+                                    errorMessage);
 ```
 
-### 2. ISensor — 感知器接口
+Runtime 将数据写入 `semantic.image.*` 和 `semantic.vision.*`，在空闲时启动视觉 invocation；有活动 invocation 时，用户输入按 FIFO 排队，视觉帧使用 latest-wins 策略。视觉链路由 `vision.input -> vision.llm -> proactive.topic` 开始，不会进入用户链路的 `web.research` 节点。
 
-所有感官输入（视觉、音频、网络等）继承此接口。
+## 运行与隐私
 
-```cpp
-class ISensor : public IModule {
-    virtual void start() = 0;              // 开始感知
-    virtual void stop() = 0;               // 停止感知
-    virtual bool isRunning() const = 0;    // 是否运行中
+- 管道 `Start()` 会启动传感器；`Stop()` 会停止定时器，但不会自动清空缓冲。
+- `saveToDisk=false` 时截图不会写入文件；若开启保存，应明确配置目录并注意屏幕内容的隐私。
+- 感知数据在进程内通过 Qt signal/slot 传递；项目当前没有为感知管道创建后台线程。
+- Runtime 的帧去重只比较编码数据的 SHA-256，窗口或光标的微小变化会被视为新帧。
 
-signals:
-    void perceptionReady(const QByteArray& data, const QString& modality);
-    void error(const QString& msg);
-};
-```
+## 相关实现
 
-### 3. ScreenshotSensor — 视觉感知器
-
-**职责**：定时全屏截图，输出 QPixmap / 字节流 / Base64。
-
-```cpp
-class ScreenshotSensor : public ISensor {
-
-    // ─── 配置 ───
-    struct Config {
-        int intervalMs;              // 截图间隔（毫秒）
-        int maxFrames;               // 最大帧数，-1 无限
-        bool captureAllScreens;      // 是否拼接多屏
-        bool saveToDisk;             // 是否保存到文件
-        QString saveDir;             // 保存目录
-        QString format;              // 图像格式：PNG / JPG / BMP
-        int quality;                 // 压缩质量
-        QString prefix;              // 文件名前缀
-        bool autoStart;              // 构造后自动启动
-    };
-
-    // ─── 构造 ───
-    ScreenshotSensor(const Config& cfg, QObject* parent);
-
-    // ─── ISensor 实现 ───
-    void start();                    // 启动定时器，立即先截一张
-    void stop();                     // 停止定时器
-    bool isRunning() const;
-
-    // ─── 截图 ───
-    QString captureOnce();           // 单次截图，返回文件路径
-
-    // ─── 数据访问 ───
-    QPixmap latestFrame() const;                    // 最新帧图像
-    QByteArray latestFrameBytes(const QString& fmt) const;   // 字节流
-    QByteArray latestFrameBase64(const QString& fmt) const;  // Base64
-    QSize frameSize() const;                        // 帧尺寸
-    int frameCount() const;                           // 已截图数量
-    QString latestFilePath() const;                   // 最新文件路径
-
-    // ─── 热更新 ───
-    void setInterval(int ms);        // 修改间隔（运行时生效）
-    void setMaxFrames(int max);      // 修改最大帧数
-    void setSaveToDisk(bool save);   // 修改保存策略
-
-signals:
-    void frameCaptured(const QPixmap& frame, int count, const QString& path);
-};
-```
-
-### 4. FrameBuffer — 帧缓冲
-
-**职责**：环形存储最近 N 帧，支持时序回溯。
-
-```cpp
-struct Frame {
-    QPixmap pixmap;          // 图像数据
-    QDateTime timestamp;    // 时间戳
-    int sequenceId;         // 序列号
-    QString filePath;       // 文件路径（如有）
-};
-
-class FrameBuffer {
-    FrameBuffer(size_t capacity);     // 容量
-
-    void push(const Frame& frame);    // 写入一帧
-    Frame latest() const;             // 最新帧
-    Frame at(size_t index) const;     // 索引：0=最新，1=次新...
-    QVector<Frame> recent(size_t n) const;   // 最近 N 帧
-    size_t size() const;              // 当前数量
-    void clear();                     // 清空
-
-    QPixmap stitchRecent(size_t n, Qt::Orientation orient) const;  // 拼接长图
-};
-```
-
-### 5. VisionEncoder — 视觉编码器
-
-**职责**：将 QPixmap 转换为模型输入格式。
-
-```cpp
-class VisionEncoder {
-
-    enum class Format {
-        RawPNG,         // PNG 原始字节
-        RawJPEG,        // JPEG 原始字节
-        Base64PNG,      // Base64 PNG（LLM API 常用）
-        Base64JPEG,     // Base64 JPEG
-        Grayscale,      // 单通道灰度
-        RGB888,         // RGB 原始字节
-    };
-
-    struct EncodeOptions {
-        int maxWidth;           // 最大宽度，0=不缩放
-        int maxHeight;          // 最大高度，0=不缩放
-        int quality;            // JPEG 质量 0-100
-        bool keepAspectRatio;   // 保持宽高比
-    };
-
-    // 编码为指定格式
-    static QByteArray encode(const QPixmap& pixmap, Format fmt,
-                             const EncodeOptions& opts = {});
-
-    // 快捷方法
-    static QByteArray toBase64(const QPixmap& pixmap,
-                                const QString& format = "PNG", int quality = -1);
-    static QByteArray toGrayscale(const QPixmap& pixmap,
-                                   int w = 0, int h = 0);
-
-    // LLM API 辅助
-    static QString makeOpenAIVisionUrl(const QByteArray& base64Png);
-    static QByteArray makeClaudeMediaPayload(const QPixmap& pixmap,
-                                                const QString& mediaType = "image/png");
-};
-```
-
-### 6. PerceptionPipeline — 感知管道
-
-**职责**：整合传感器 → 缓冲 → 编码 → 输出，支持处理链。
-
-```cpp
-class PerceptionPipeline : public QObject {
-
-    // ─── 配置 ───
-    struct Config {
-        ScreenshotSensor::Config sensorConfig;     // 传感器配置
-        size_t bufferCapacity;                      // 缓冲容量
-        VisionEncoder::Format encodeFormat;         // 编码格式
-        VisionEncoder::EncodeOptions encodeOptions;   // 编码选项
-        bool enableBuffer;                          // 是否启用缓冲
-    };
-
-    // ─── 构造 ───
-    PerceptionPipeline(const Config& cfg, QObject* parent);
-
-    // ─── 控制 ───
-    void start();                    // 启动管道
-    void stop();                     // 停止管道
-    bool isRunning() const;
-
-    // ─── 数据获取 ───
-    QByteArray latestEncodedData() const;                    // 最新编码数据
-    QVector<QByteArray> recentEncodedData(size_t n) const;   // 最近 N 帧编码数据
-
-    // ─── 处理链 ───
-    using Processor = std::function<QPixmap(const QPixmap&)>;
-    void addProcessor(Processor proc);    // 添加图像处理中间件
-    void clearProcessors();                // 清空处理链
-
-signals:
-    void dataReady(const QByteArray& encodedData, int frameId);
-    void batchReady(const QVector<QByteArray>& batch, int latestFrameId);
-    void error(const QString& msg);
-};
-```
-
-### 7. Agent — 核心
-
-**职责**：模块注册、生命周期管理、配置中心。
-
-```cpp
-class Agent : public QObject {
-
-    Agent(QObject* parent);
-
-    // ─── 模块管理 ───
-    void registerModule(const QString& name, IModule* module);
-    IModule* module(const QString& name) const;
-    template<typename T> T* moduleAs(const QString& name) const;
-
-    // ─── 快捷访问 ───
-    PerceptionPipeline* vision() const;    // 视觉感知管道
-
-    // ─── 生命周期 ───
-    void initialize();
-    void start();
-    void stop();
-    bool isRunning() const;
-
-    // ─── 配置 ───
-    void setConfig(const QString& key, const QVariant& value);
-    QVariant config(const QString& key) const;
-
-signals:
-    void initialized();
-    void started();
-    void stopped();
-    void perceptionReceived(const QByteArray& data, const QString& modality);
-    void error(const QString& module, const QString& msg);
-};
-```
-
----
-
-## 数据流
-
-```
-Screen ──[grabWindow]──▶ QPixmap ──[Processor链]──▶ QPixmap
-                                                       │
-                                                       ▼
-                                              ┌────────────────┐
-                                              │  FrameBuffer   │
-                                              │  (环形缓冲)     │
-                                              └───────┬────────┘
-                                                      │
-                                                      ▼
-                                              ┌────────────────┐
-                                              │ VisionEncoder  │
-                                              │ encode()       │
-                                              └───────┬────────┘
-                                                      │
-                                                      ▼
-                                              ┌────────────────┐
-                                              │ QByteArray     │
-                                              │ (Base64/Raw)   │
-                                              └───────┬────────┘
-                                                      │
-                                                      ▼
-                                              ┌────────────────┐
-                                              │ Agent          │
-                                              │ perceptionReceived()
-                                              └────────────────┘
-                                                      │
-                                                      ▼
-                                              ┌────────────────┐
-                                              │ LLM Vision API │
-                                              │ (GPT-4o/Claude)│
-                                              └────────────────┘
-```
-
----
-
-## 目录结构
-
-```
-pet_agent/
-├── CMakeLists.txt
-├── include/
-│   └── pet_agent/
-│       ├── core/
-│       │   ├── module.h
-│       │   └── agent.h
-│       ├── sensor/
-│       │   ├── sensor.h
-│       │   └── screenshot_sensor.h
-│       └── perception/
-│           ├── frame_buffer.h
-│           ├── vision_encoder.h
-│           └── perception_pipeline.h
-├── src/
-│   ├── core/
-│   │   └── agent.cpp
-│   ├── sensor/
-│   │   └── screenshot_sensor.cpp
-│   └── perception/
-│       ├── frame_buffer.cpp
-│       ├── vision_encoder.cpp
-│       └── perception_pipeline.cpp
-└── examples/
-    └── cli/
-        └── main.cpp
-```
-
----
-
-## 使用范式
-
-```cpp
-// 1. 创建 Agent
-Agent agent;
-
-// 2. 配置视觉管道
-PerceptionPipeline::Config cfg;
-cfg.sensorConfig.intervalMs = 3000;       // 3 秒一帧
-cfg.sensorConfig.saveToDisk = false;    // 纯内存
-cfg.encodeFormat = VisionEncoder::Format::Base64PNG;
-
-auto* vision = new PerceptionPipeline(cfg, &agent);
-agent.registerModule("vision", vision);
-
-// 3. 可选：添加图像处理中间件
-vision->addProcessor([](const QPixmap& frame) {
-    return frame.scaled(1920, 1080, Qt::KeepAspectRatio);
-});
-
-// 4. 接收感知数据
-connect(&agent, &Agent::perceptionReceived,
-        [](const QByteArray& data, const QString& modality) {
-    // data 即 Base64，直接构造 LLM payload
-});
-
-// 5. 启动
-agent.initialize();
-agent.start();
-```
+- `include/vpet/sensor/screenshot_sensor.h`
+- `include/vpet/perception/frame_buffer.h`
+- `include/vpet/perception/vision_encoder.h`
+- `include/vpet/perception/perception_pipeline.h`
+- `src/main_window.cpp`
+- `src/agent/agent_runtime.cpp`
+- `AGENT_CONTEXT_KEY_PROTOCOL.md`
