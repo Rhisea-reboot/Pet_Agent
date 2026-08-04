@@ -55,8 +55,7 @@ QStringList ReadEngines(const QJsonObject &config)
 
     if (engines.isEmpty())
     {
-        engines.append(QStringLiteral("duckduckgo"));
-        engines.append(QStringLiteral("startpage"));
+        engines.append(QStringLiteral("bing"));
     }
 
     return engines;
@@ -262,7 +261,20 @@ bool WebResearchNode::CompleteFailure(const QString &message,
                                       AgentContext &context,
                                       QString &errorMessage)
 {
-    const QString question = context.GetUserInput().trimmed();
+    QVariant questionValue;
+    QString question;
+
+    if (context.GetValue(AgentContextKeys::SEMANTIC_TEXT_PROMPT, questionValue)
+        || context.GetValue(AgentContextKeys::NODE_INPUT_PROMPT, questionValue)
+        || context.GetValue(AgentContextKeys::PROMPT_TEXT, questionValue))
+    {
+        question = questionValue.toString().trimmed();
+    }
+
+    if (question.isEmpty())
+    {
+        question = context.GetUserInput().trimmed();
+    }
     const QString normalizedMessage = message.trimmed().isEmpty()
                                           ? QStringLiteral("Web research failed for a technical reason.")
                                           : message.trimmed();

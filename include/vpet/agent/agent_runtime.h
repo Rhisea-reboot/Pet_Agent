@@ -8,6 +8,7 @@
 #include "vpet/agent/invocation_queue_policy.h"
 #include "vpet/agent/agent_output_policy.h"
 #include "vpet/llm/vision_llm_client.h"
+#include "vpet/web/web_research_engine.h"
 
 #include <QByteArray>
 #include <QHash>
@@ -23,9 +24,7 @@ namespace vpet
 {
 
 class LlmClient;
-class WebResearchEngine;
 struct _tagLlmRequestOptions;
-struct _tagWebResearchResponse;
 
 /**
  * @brief Agent DAG 运行时启动器
@@ -538,6 +537,13 @@ private:
     QString m_lastPerceptionFrameHash;     ///< 最近已接受视觉帧内容指纹
     bool m_isLoaded;                      ///< 是否已加载配置
     bool m_contextWasQueued;              ///< 最近一次上下文是否已由入口加入 FIFO
+    bool m_webResearchStartInProgress;    ///< web.research Start 调用期间暂存同步回调
+    bool m_hasBufferedWebResearchCompletion; ///< 是否收到 Start 期间的同步完成回调
+    bool m_hasBufferedWebResearchFailure; ///< 是否收到 Start 期间的同步失败回调
+    _tagWebResearchResponse m_bufferedWebResearchCompletion; ///< 暂存的同步完成结果
+    int m_bufferedWebResearchFailureId;   ///< 暂存的同步失败研究 ID
+    QString m_bufferedWebResearchFailureMessage; ///< 暂存的同步失败原因
+    int m_bufferedWebResearchFailureStatusCode; ///< 暂存的同步失败状态码
 };
 
 } // namespace vpet

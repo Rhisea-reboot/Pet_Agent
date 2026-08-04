@@ -1,6 +1,7 @@
 #include "vpet/agent/agent_runtime.h"
 #include "vpet/agent/proactive_topic_node.h"
 #include "vpet/agent/agent_context_keys.h"
+#include "vpet/agent/web_research_node.h"
 #include "vpet/web/web_research_engine.h"
 
 #include <QCoreApplication>
@@ -54,6 +55,45 @@ public:
     int startCount;
     int activeResearchId;
     vpet::_tagWebResearchRequest lastRequest;
+};
+
+class SynchronousWebResearchEngine : public vpet::WebResearchEngine
+{
+public:
+    enum Outcome
+    {
+        CompleteImmediately,
+        FailImmediately
+    };
+
+    explicit SynchronousWebResearchEngine(Outcome outcome)
+        : vpet::WebResearchEngine(nullptr, nullptr)
+        , outcome(outcome)
+        , activeResearchId(73)
+    {
+    }
+
+    int Start(const vpet::_tagWebResearchRequest &request) override
+    {
+        if (outcome == CompleteImmediately)
+        {
+            vpet::_tagWebResearchResponse response;
+            response.researchId = activeResearchId;
+            response.question = request.question;
+            response.status = QStringLiteral("completed");
+            response.summary = QStringLiteral("Synchronous research result.");
+            emit Completed(response);
+        }
+        else
+        {
+            emit Failed(activeResearchId, QStringLiteral("Synchronous research failure."), 0);
+        }
+
+        return activeResearchId;
+    }
+
+    Outcome outcome;
+    int activeResearchId;
 };
 
 bool WriteDagConfig(const QTemporaryDir &temporaryDirectory,
@@ -160,6 +200,11 @@ private slots:
     void DefersSynchronousWebResearchCompletionUntilPendingRegistration();
     void IsolatesWebRequestNamespaceAndSerializesResponse();
     void ContinuesAfterWebResearchFailure();
+    void ContinuesAfterWebResearchFailureForVisionPrompt();
+    void HandlesSynchronousWebResearchCompletion();
+    void HandlesSynchronousWebResearchFailure();
+    void DefaultsWebResearchEnginesToBing();
+    void RejectsUntriggeredExecuteWhileInvocationIsActive();
     void SkipsWebResearchForVisionTrigger();
     void RejectsLlmJoinWithoutMergePolicy();
 };
@@ -2009,6 +2054,160 @@ void AgentRuntimeSchedulerTest::ContinuesAfterWebResearchFailure()
         vpet::AgentContextKeys::SEMANTIC_WEB_RESEARCH_STATUS,
         statusValue));
     QCOMPARE(statusValue.toString(), QStringLiteral("error"));
+}
+
+void AgentRuntimeSchedulerTest::ContinuesAfterWebResearchFailureForVisionPrompt()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"vision","type":"vision_source","config":{"trigger":"vision"}},{"id":"research","type":"web.research","config":{"failure_policy":"continue","async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"vision","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    ControlledWebResearchEngine researchEngine;
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    QString fallbackPrompt;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("vision_source"),
+                                        [](const vpet::_tagAgentDagNode &,
+                                           vpet::AgentContext &context,
+                                           QString &)
+    {
+        return context.SetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_PROMPT,
+                                QStringLiteral("What is shown in this screen?"));
+    }));
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&fallbackPrompt](const vpet::_tagAgentDagNode &,
+                                                          vpet::AgentContext &context,
+                                                          QString &)
+    {
+        QVariant promptValue;
+
+        if (!context.GetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_PROMPT, promptValue))
+        {
+            return false;
+        }
+
+        fallbackPrompt = promptValue.toString();
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.UpdatePerceptionFrame(QByteArrayLiteral("frame-data"),
+                                          1,
+                                          QSize(8, 8),
+                                          QStringLiteral("image/png"),
+                                          errorMessage));
+    QVERIFY(runtime.Execute(errorMessage));
+    QVERIFY(runtime.HasPendingAsyncRequest());
+
+    researchEngine.Fail(QStringLiteral("Web search service unavailable."));
+
+    QVERIFY(!runtime.HasPendingAsyncRequest());
+    QVERIFY(fallbackPrompt.contains(QStringLiteral("What is shown in this screen?")));
+    QVERIFY(fallbackPrompt.contains(QStringLiteral("不得声称已经联网核实")));
+}
+
+void AgentRuntimeSchedulerTest::HandlesSynchronousWebResearchCompletion()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    SynchronousWebResearchEngine researchEngine(
+        SynchronousWebResearchEngine::CompleteImmediately);
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    int sinkCount = 0;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkCount](const vpet::_tagAgentDagNode &,
+                                                     vpet::AgentContext &,
+                                                     QString &)
+    {
+        ++sinkCount;
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.ExecuteWithUserInput(QStringLiteral("Synchronous question"), errorMessage));
+
+    QTRY_COMPARE(sinkCount, 1);
+    QVERIFY(!runtime.HasPendingAsyncRequest());
+}
+
+void AgentRuntimeSchedulerTest::HandlesSynchronousWebResearchFailure()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"user","type":"user.input","config":{"trigger":"user"}},{"id":"research","type":"web.research","config":{"failure_policy":"continue","async_timeout_ms":1000}},{"id":"sink","type":"sink"}],"edges":[{"from":"user","to":"research"},{"from":"research","to":"sink"}]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    SynchronousWebResearchEngine researchEngine(SynchronousWebResearchEngine::FailImmediately);
+    vpet::AgentRuntime runtime(&researchEngine, nullptr);
+    int sinkCount = 0;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("sink"),
+                                        [&sinkCount](const vpet::_tagAgentDagNode &,
+                                                     vpet::AgentContext &,
+                                                     QString &)
+    {
+        ++sinkCount;
+        return true;
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.ExecuteWithUserInput(QStringLiteral("Synchronous question"), errorMessage));
+
+    QTRY_COMPARE(sinkCount, 1);
+    QVERIFY(!runtime.HasPendingAsyncRequest());
+}
+
+void AgentRuntimeSchedulerTest::DefaultsWebResearchEnginesToBing()
+{
+    vpet::_tagAgentDagNode node;
+    node.id = QStringLiteral("research");
+    node.type = vpet::AgentContextKeys::NODE_TYPE_WEB_RESEARCH;
+    vpet::AgentContext context;
+    QVERIFY(context.SetValue(vpet::AgentContextKeys::SEMANTIC_TEXT_PROMPT,
+                             QStringLiteral("Current Qt release")));
+    vpet::_tagWebResearchRequest request;
+    QString errorMessage;
+
+    QVERIFY(vpet::WebResearchNode::BuildRequest(node, context, request, errorMessage));
+    QCOMPARE(request.engines, QStringList({QStringLiteral("bing")}));
+}
+
+void AgentRuntimeSchedulerTest::RejectsUntriggeredExecuteWhileInvocationIsActive()
+{
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QByteArray jsonData = QByteArrayLiteral(
+        R"({"nodes":[{"id":"source","type":"async_source"}],"edges":[]})");
+    QString configPath;
+    QVERIFY(WriteDagConfig(temporaryDirectory, jsonData, configPath));
+
+    vpet::AgentRuntime runtime;
+    QVERIFY(runtime.RegisterNodeHandler(QStringLiteral("async_source"),
+                                        [](const vpet::_tagAgentDagNode &node,
+                                           vpet::AgentContext &context,
+                                           QString &)
+    {
+        return context.SetValue(vpet::AgentContextKeys::RUNTIME_PENDING, true)
+               && context.SetValue(vpet::AgentContextKeys::RUNTIME_PENDING_NODE_ID, node.id)
+               && context.SetValue(vpet::AgentContextKeys::RUNTIME_PENDING_NODE_TYPE, node.type)
+               && context.SetValue(vpet::AgentContextKeys::RUNTIME_PENDING_REQUEST_ID, 88);
+    }));
+    QString errorMessage;
+    QVERIFY(runtime.Load(configPath, errorMessage));
+    QVERIFY(runtime.Execute(errorMessage));
+    QVERIFY(runtime.HasPendingAsyncRequest());
+
+    errorMessage.clear();
+    QVERIFY(!runtime.Execute(errorMessage));
+    QVERIFY(errorMessage.contains(QStringLiteral("without a trigger")));
 }
 
 void AgentRuntimeSchedulerTest::RejectsLlmJoinWithoutMergePolicy()

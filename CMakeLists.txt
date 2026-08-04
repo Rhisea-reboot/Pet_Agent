@@ -53,6 +53,9 @@ set(VPET_SOURCES
     src/agent/agent_graph_executor.cpp
     src/agent/agent_async_bridge.cpp
     src/agent/agent_runtime.cpp
+    src/agent/agent_runtime_scheduler.cpp
+    src/agent/agent_runtime_nodes.cpp
+    src/agent/agent_runtime_async.cpp
 )
 
 set(VPET_HEADERS
@@ -153,6 +156,9 @@ if(BUILD_TESTING)
         src/agent/agent_graph_executor.cpp
         src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
+        src/agent/agent_runtime_scheduler.cpp
+        src/agent/agent_runtime_nodes.cpp
+        src/agent/agent_runtime_async.cpp
         src/web/web_search_client.cpp
         src/web/web_search_tool.cpp
         src/web/web_research_engine.cpp
@@ -206,6 +212,9 @@ if(BUILD_TESTING)
         src/agent/agent_graph_executor.cpp
         src/agent/agent_async_bridge.cpp
         src/agent/agent_runtime.cpp
+        src/agent/agent_runtime_scheduler.cpp
+        src/agent/agent_runtime_nodes.cpp
+        src/agent/agent_runtime_async.cpp
         src/web/web_search_client.cpp
         src/web/web_search_tool.cpp
         src/web/web_research_engine.cpp

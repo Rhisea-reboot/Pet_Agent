@@ -286,7 +286,6 @@ bool VoiceInputManager::StartAsrProcess(QString &errorMessage)
     }
 
     QStringList arguments;
-    arguments.append(QStringLiteral("-s"));
     arguments.append(scriptPath);
     arguments.append(QStringLiteral("-i"));
     arguments.append(m_recordInputDirectory);

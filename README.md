@@ -115,6 +115,24 @@ cmake --build build --config Debug
 
 用 Qt Creator 打开 `CMakeLists.txt` 亦可。可执行目标名：`VPet`。
 
+## 测试
+
+Windows 下直接运行 `ctest` 时，若 Qt 的 `bin/` 目录不在 `PATH`，测试进程会以
+`0xc0000135` 启动失败。使用项目脚本可从 `CMakeCache.txt` 推导 Qt 与匹配的 MinGW
+运行时目录，并只为测试子进程补齐 `PATH`：
+
+```powershell
+.\scripts\Run-Tests.ps1
+```
+
+首次配置或使用其他构建目录时，显式指定 Qt 安装前缀：
+
+```powershell
+.\scripts\Run-Tests.ps1 -BuildDirectory build-clean -QtPrefix E:\Qt\6.9.2\mingw_64
+```
+
+脚本会构建 `Debug` 目标后执行全部 CTest。传入 `-SkipBuild` 可只运行已构建的测试。
+
 运行时需能找到：
 
 1. `Animation/` 动画目录（可执行文件旁，或项目根目录）
