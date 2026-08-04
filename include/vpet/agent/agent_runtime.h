@@ -24,6 +24,7 @@ namespace vpet
 
 class LlmClient;
 class WebResearchEngine;
+struct _tagLlmRequestOptions;
 struct _tagWebResearchResponse;
 
 /**
@@ -394,6 +395,17 @@ private:
     bool ExecuteLlmChatNode(const _tagAgentDagNode &node,
                              AgentContext &context,
                              QString &errorMessage);
+
+    /**
+     * @brief 从节点配置解析文本 LLM 请求参数
+     * @param[in] node 节点定义
+     * @param[out] options 解析后的请求参数
+     * @param[out] errorMessage 错误描述
+     * @return 解析成功返回 true
+     */
+    static bool ParseLlmRequestOptions(const _tagAgentDagNode &node,
+                                       _tagLlmRequestOptions &options,
+                                       QString &errorMessage);
 
     /** @brief 执行联网研究节点。 @param[in] node 节点定义。 @param[in,out] context 上下文。 @param[out] errorMessage 错误描述。 @return 成功返回 true。 */
     bool ExecuteWebResearchNode(const _tagAgentDagNode &node,

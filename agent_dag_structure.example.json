@@ -51,7 +51,10 @@
     {
       "id": "call_llm",
       "type": "llm.chat",
-      "config": {}
+      "config": {
+        "temperature": 0.7,
+        "max_tokens": 2048
+      }
     },
     {
       "id": "emotion_rewrite",

@@ -80,6 +80,16 @@ const QString &CONTEXT_KEY_VISION_UPDATED_AT = AgentContextKeys::VISION_UPDATED_
 constexpr int MAX_CONVERSATION_HISTORY_ITEMS = 60;
 constexpr int DEFAULT_ASYNC_TIMEOUT_MS = 120000;
 constexpr int MAX_ASYNC_TIMEOUT_MS = 600000;
+constexpr double LLM_TEMPERATURE_MIN = 0.0;
+constexpr double LLM_TEMPERATURE_MAX = 2.0;
+constexpr double LLM_TOP_P_MIN = 0.0;
+constexpr double LLM_TOP_P_MAX = 1.0;
+constexpr double LLM_FREQUENCY_PENALTY_MIN = -2.0;
+constexpr double LLM_FREQUENCY_PENALTY_MAX = 2.0;
+constexpr double LLM_PRESENCE_PENALTY_MIN = -2.0;
+constexpr double LLM_PRESENCE_PENALTY_MAX = 2.0;
+constexpr int LLM_MAX_TOKENS_MIN = 1;
+constexpr int LLM_MAX_TOKENS_MAX = 32768;
 const QString TRIGGER_TYPE_USER = QStringLiteral("user");
 const QString TRIGGER_TYPE_VISION = QStringLiteral("vision");
 const QString ASYNC_CLIENT_TEXT = QStringLiteral("text");
@@ -1230,6 +1240,127 @@ bool AgentRuntime::ExecuteVisionLlmNode(const _tagAgentDagNode &node,
     return true;
 }
 
+bool AgentRuntime::ParseLlmRequestOptions(const _tagAgentDagNode &node,
+                                          _tagLlmRequestOptions &options,
+                                          QString &errorMessage)
+{
+    const QJsonObject configObject = node.config;
+
+    if (configObject.isEmpty())
+    {
+        return true;
+    }
+
+    const QJsonValue temperatureValue = configObject.value(QStringLiteral("temperature"));
+
+    if (temperatureValue.isUndefined() == false)
+    {
+        if (!temperatureValue.isDouble())
+        {
+            errorMessage = QStringLiteral("Agent LLM node temperature is not a number.");
+            return false;
+        }
+
+        const double temperature = temperatureValue.toDouble();
+
+        if ((temperature < LLM_TEMPERATURE_MIN) || (temperature > LLM_TEMPERATURE_MAX))
+        {
+            errorMessage = QStringLiteral("Agent LLM node temperature is outside the allowed range.");
+            return false;
+        }
+
+        options.temperature = temperature;
+    }
+
+    const QJsonValue topPValue = configObject.value(QStringLiteral("top_p"));
+
+    if (topPValue.isUndefined() == false)
+    {
+        if (!topPValue.isDouble())
+        {
+            errorMessage = QStringLiteral("Agent LLM node top_p is not a number.");
+            return false;
+        }
+
+        const double topP = topPValue.toDouble();
+
+        if ((topP < LLM_TOP_P_MIN) || (topP > LLM_TOP_P_MAX))
+        {
+            errorMessage = QStringLiteral("Agent LLM node top_p is outside the allowed range.");
+            return false;
+        }
+
+        options.topP = topP;
+    }
+
+    const QJsonValue frequencyPenaltyValue = configObject.value(QStringLiteral("frequency_penalty"));
+
+    if (frequencyPenaltyValue.isUndefined() == false)
+    {
+        if (!frequencyPenaltyValue.isDouble())
+        {
+            errorMessage = QStringLiteral("Agent LLM node frequency_penalty is not a number.");
+            return false;
+        }
+
+        const double frequencyPenalty = frequencyPenaltyValue.toDouble();
+
+        if ((frequencyPenalty < LLM_FREQUENCY_PENALTY_MIN)
+            || (frequencyPenalty > LLM_FREQUENCY_PENALTY_MAX))
+        {
+            errorMessage = QStringLiteral("Agent LLM node frequency_penalty is outside the allowed range.");
+            return false;
+        }
+
+        options.frequencyPenalty = frequencyPenalty;
+    }
+
+    const QJsonValue presencePenaltyValue = configObject.value(QStringLiteral("presence_penalty"));
+
+    if (presencePenaltyValue.isUndefined() == false)
+    {
+        if (!presencePenaltyValue.isDouble())
+        {
+            errorMessage = QStringLiteral("Agent LLM node presence_penalty is not a number.");
+            return false;
+        }
+
+        const double presencePenalty = presencePenaltyValue.toDouble();
+
+        if ((presencePenalty < LLM_PRESENCE_PENALTY_MIN)
+            || (presencePenalty > LLM_PRESENCE_PENALTY_MAX))
+        {
+            errorMessage = QStringLiteral("Agent LLM node presence_penalty is outside the allowed range.");
+            return false;
+        }
+
+        options.presencePenalty = presencePenalty;
+    }
+
+    const QJsonValue maxTokensValue = configObject.value(QStringLiteral("max_tokens"));
+
+    if (maxTokensValue.isUndefined() == false)
+    {
+        if (!maxTokensValue.isDouble())
+        {
+            errorMessage = QStringLiteral("Agent LLM node max_tokens is not a number.");
+            return false;
+        }
+
+        const int maxTokens = maxTokensValue.toInt();
+
+        if ((maxTokens < LLM_MAX_TOKENS_MIN) || (maxTokens > LLM_MAX_TOKENS_MAX))
+        {
+            errorMessage = QStringLiteral("Agent LLM node max_tokens is outside the allowed range.");
+            return false;
+        }
+
+        options.maxTokens = maxTokens;
+    }
+
+    return true;
+}
+
 bool AgentRuntime::ExecuteLlmChatNode(const _tagAgentDagNode &node,
                                       AgentContext &context,
                                       QString &errorMessage)
@@ -1264,7 +1395,14 @@ bool AgentRuntime::ExecuteLlmChatNode(const _tagAgentDagNode &node,
         return false;
     }
 
-    const int requestId = m_llmClient->SendPrompt(promptText);
+    _tagLlmRequestOptions options;
+
+    if (!ParseLlmRequestOptions(node, options, errorMessage))
+    {
+        return false;
+    }
+
+    const int requestId = m_llmClient->SendPrompt(promptText, options);
 
     if (requestId <= 0)
     {
@@ -1308,7 +1446,10 @@ bool AgentRuntime::ExecuteLlmChatNode(const _tagAgentDagNode &node,
         return false;
     }
 
-    emit LogMessage(QStringLiteral("Agent LLM node request sent: %1").arg(requestId));
+    emit LogMessage(QStringLiteral("Agent LLM node request sent: %1 (temperature=%2, max_tokens=%3)")
+                            .arg(requestId)
+                            .arg(options.temperature)
+                            .arg(options.maxTokens));
 
     return true;
 }

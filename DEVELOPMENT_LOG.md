@@ -2321,3 +2321,22 @@ P0 四项已全部收敛：
 - `web.research` 已作为完整可调用组件默认生效：daemon 运行时自动按检索决策规则联网研究，daemon 不可用时按 `continue` 策略降级为普通对话。
 - 联网搜索 P0/P1/P2 全部清单项已闭环。
 - 剩余记录在案但非阻塞的建议项：自动化 daemon 测试与 auto 评估之外的评审建议（工具调用循环、情感→动画、LLM 客户端流式等）见 `docs/architecture_review_2026-08-01.md`。
+
+## 2026-08-03 llm.chat 节点配置参数透传修复
+
+修复评审遗留问题：`llm.chat` 节点的 `config`（`temperature`、`top_p`、`frequency_penalty`、`presence_penalty`、`max_tokens`）此前被静默忽略，节点执行时始终调用单参 `SendPrompt(promptText)`，配置对请求无任何影响。
+
+### 修改内容
+
+- `include/vpet/agent/agent_runtime.h`：新增 `_tagLlmRequestOptions` 前向声明；私有区新增 `static bool ParseLlmRequestOptions(const _tagAgentDagNode &node, _tagLlmRequestOptions &options, QString &errorMessage);`。
+- `src/agent/agent_runtime.cpp`：
+  - 匿名命名空间新增参数范围常量：`LLM_TEMPERATURE_MIN/MAX=0.0/2.0`、`LLM_TOP_P_MIN/MAX=0.0/1.0`、`LLM_FREQUENCY_PENALTY_MIN/MAX=-2.0/2.0`、`LLM_PRESENCE_PENALTY_MIN/MAX=-2.0/2.0`、`LLM_MAX_TOKENS_MIN/MAX=1/32768`。
+  - 新增 `AgentRuntime::ParseLlmRequestOptions`：解析并校验五个参数，字段类型错误报 `not a number`，越界报 `outside the allowed range`，未提供或空 `config` 直接返回 true（沿用客户端默认值）。
+  - `ExecuteLlmChatNode`：执行前调用 `ParseLlmRequestOptions`，解析失败返回 false；请求改走双参 `SendPrompt(promptText, options)`；日志补充输出 `temperature` 与 `max_tokens`。
+- `agent_dag_structure.json` / `agent_dag_structure.example.json`：`call_llm` 节点 `config` 沉淀示例 `{"temperature": 0.7, "max_tokens": 2048}`。
+- `README.md`：`llm.chat` 模块表格补充可配置参数与取值范围、越界报错行为说明。
+
+### 验证结果
+
+- CTest 6/6 通过，全量增量构建无错误。
+- 单元测试用 `RegisterNodeHandler` 覆盖 `llm.chat` 节点，无法直接断言真实节点路径；按既有先例（如 MiMo 字段选择函数）以源码复核 + 全量回归验证。

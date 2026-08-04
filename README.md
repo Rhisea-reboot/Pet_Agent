@@ -228,7 +228,7 @@ copy vision_llm_config.example.json vision_llm_config.json
 | `vision.llm` | 调用视觉 LLM 生成屏幕摘要 | `semantic.image.base64`、媒体类型和尺寸 | 输出 `semantic.vision.summary`；可配置 `prompt` |
 | `proactive.topic` | 判断是否允许主动发话并组装提示词 | `semantic.vision.summary` | 输出 `semantic.proactive.*`、`semantic.text.prompt`；可配置 `enabled`、`instruction`、`min_interval_ms`、`dedup_window_ms` |
 | `web.research` | 受预算限制的联网研究 | `semantic.text.prompt` | 输出 invocation-local 的 `semantic.web.research.*` 并重组 `semantic.text.prompt`；默认 `mode=auto`（按检索决策规则判断，`/search` 等显式触发词始终强制检索），失败策略为 `continue` |
-| `llm.chat` | 调用文本 LLM | `semantic.text.prompt` | 输出 `semantic.text.response`；配置可扩展，通常使用 `{}` |
+| `llm.chat` | 调用文本 LLM | `semantic.text.prompt` | 输出 `semantic.text.response`；可配置 `temperature`（0-2）、`top_p`（0-1）、`frequency_penalty`/`presence_penalty`（-2 到 2）、`max_tokens`（1-32768），缺省时使用客户端默认值，越界值会明确报错 |
 | `emotion.rewrite` | 根据对话上下文总结情绪并改写回复 | `semantic.text.response`、`conversation.history` | 输出情绪标签和改写后的 `semantic.text.response`；无历史时可透传 |
 | `output.format` | 生成最终输出并维护对话历史 | `semantic.text.response` | 输出 `semantic.text.final`、`semantic.output.source`；无输出且主动策略拒绝时静默结束 |
 
