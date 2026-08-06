@@ -291,6 +291,36 @@ conversation.history      对话历史
 
 编辑 `tts_config.json`（服务地址、参考音频、语种等）。启动时会尝试拉起本地 GPT-SoVITS；失败时桌宠仍可运行，说话可能退化为仅文字气泡。
 
+### 5. 提示词修改指南
+
+提示词按存放位置分两类：**改配置文件即可**（重启生效）和**改 C++ 源码**（需重新构建）。
+
+#### 改配置文件即可
+
+| 提示词 | 位置 | 说明 |
+|---|---|---|
+| 视觉识别提示词 | `agent_dag_structure.json` → `vision_llm` 节点 `config.prompt` | 非空时优先于 `vision_llm_config.json` 的 `default_prompt`；两者都为空时不发提示词 |
+| 视觉识别默认提示词 | `vision_llm_config.json` → `default_prompt` | 仅当 DAG 节点未配置 `prompt` 时生效 |
+| 主动话题提示词 | `agent_dag_structure.json` → `proactive_topic` 节点 `config.instruction` | 约束文本 LLM 如何根据画面摘要生成主动话语 |
+| 文本 LLM 系统提示词（桌宠人设） | `context.md` | 与 `llm_config.json` 同目录，或可执行文件目录 / 当前工作目录（按此顺序查找）；文件不存在或为空时，LLM 请求不带 system 消息 |
+
+示例：修改桌宠人设只需在项目根目录创建/编辑 `context.md`，内容即整体系统提示词，改完重启程序。
+
+#### 需改 C++ 源码（硬编码）
+
+| 提示词 | 位置 |
+|---|---|
+| 情感改写提示词 | `src/agent/emotion_rewrite_node.cpp` 的 `BuildPrompt`（约 218-232 行） |
+| 主动话题包装模板（"当前画面摘要…只输出最终要说的话"） | `src/agent/proactive_topic_node.cpp` 的 `BuildPrompt`（约 187-193 行） |
+| 联网研究结果组装 / 失败降级提示词 | `src/agent/web_research_node.cpp` 的 `WriteResearchPrompt` |
+| 视觉 LLM 的 system 消息（MiMo 档位） | `src/llm/vision_llm_client.cpp`（约 253-257 行） |
+
+注意：
+
+- 情感改写的提示词强制要求输出严格 JSON（字段 `user_emotion`、`pet_emotion`、`rewrite`），修改时不要破坏该格式，否则下游解析失败。
+- 联网研究的降级提示词包含"不得伪装已联网验证"的安全约束，修改时建议保留。
+- 修改 C++ 源码后需重新构建；修改 JSON / `context.md` 后重启程序即可。
+
 ---
 
 ## 使用
