@@ -325,14 +325,85 @@ conversation.history      对话历史
 
 ## 使用
 
-1. 配置 `llm_config.json`、`vision_llm_config.json`；需要联网研究时，将 `web_search_config.example.json` 复制为被 Git 忽略的 `web_search_config.json`（及可选 TTS）
-2. 启动 `VPet`
-3. 桌宠出现在屏幕上：
-   - **左键拖动**：提起/移动
-   - **点击头/身体**：触摸动画
-   - **右键菜单**：语音输入说明、视觉模型切换
-   - **Ctrl+Alt+V**：开始/结束语音输入并提交给 Agent
-4. 截图感知默认约每 3 秒一帧；运行时空闲时立即进入视觉 DAG，已有 invocation 时视觉帧按内容去重并采用 latest-wins 等待执行
+### 1. 首次使用前准备
+
+按需准备以下文件（详见[配置](#配置)章节）：
+
+| 文件 | 用途 | 必需 |
+|---|---|---|
+| `llm_config.json` | 文本 LLM（对话/主动发话） | 是（无则对话不可用） |
+| `vision_llm_config.json` | 视觉 LLM（截图理解） | 屏幕感知需要 |
+| `web_search_config.json` | 联网研究（配合本地 daemon） | 联网研究需要 |
+| `tts_config.json` + GPT-SoVITS 环境 | 语音播报 | 可选，缺失时退化为文字气泡 |
+| `context.md` | 桌宠人设（系统提示词） | 可选 |
+
+可选能力：
+
+- **联网研究**：先启动本地 `open-webSearch` daemon（默认 `127.0.0.1:3210`，详见 `vendor/open-webSearch/README.md`），再将 `web_search_config.example.json` 复制为 `web_search_config.json`。daemon 未启动时 Agent 会自动降级为普通对话。
+- **TTS 播报**：应用启动时自动尝试拉起本地 GPT-SoVITS 服务（`127.0.0.1:9880`）并健康检查；也可先手动运行 `start_tts_server.bat`。
+
+### 2. 启动
+
+构建（见[构建](#构建)）后运行 `VPet`：
+
+1. 出现启动画面，等待 Agent/TTS 初始化（TTS 健康检查最多约 36 秒，失败或超时会自动跳过）
+2. 桌宠出现在屏幕上，待机动画随机走动或发呆
+
+### 3. 基础交互
+
+| 操作 | 效果 |
+|---|---|
+| 左键按下后拖动（超过 5 像素） | 提起/拖拽桌宠，松手后落回；拖动期间播放 Raise 动画并显示气泡 |
+| 点击头部 | 摸头动画（A→B→C 完整播放） |
+| 点击身体 | 摸身体动画（A→B→C 完整播放） |
+| 右键 | 打开菜单（见下） |
+
+动画播放遵循优先级：`拖拽 > 触摸 > 行走 > 待机`，高优先级操作会打断低优先级动画。
+
+右键菜单包含：
+
+- **Ctrl+Alt+V 语音输入**：等同于快捷键，见[语音输入](#4-语音输入)
+- **屏幕感知（截图）**：复选框，开关屏幕感知（默认关闭）
+- **图像识别模型设置**：`mimo-v2.5` / `gpt` 档位切换（仅当视觉 LLM 已配置时出现）
+
+### 4. 语音输入
+
+1. 按 `Ctrl+Alt+V`（或右键菜单"语音输入"）开始录音，再次按下结束
+2. 录音自动经 GPT-SoVITS 环境中的 ASR 脚本转写为文字（需要本地 `GPT-SoVITS/` 目录）
+3. 转写结果作为用户输入提交给 Agent DAG，回复通过气泡/TTS 输出
+
+### 5. 屏幕感知与主动发话
+
+1. 右键菜单勾选 **屏幕感知（截图）** 开启（隐私 opt-in，默认关闭；截图仅存内存，不落盘）
+2. 约每 3 秒截取一屏，经 `vision.llm` 生成画面摘要
+3. 摘要进入 `proactive.topic` 节点，满足以下条件才主动说话：
+   - 距上次主动发话超过 `min_interval_ms`（默认 30 秒）
+   - 画面摘要与过去 `dedup_window_ms`（默认 5 分钟）内的摘要指纹不同
+4. 满足时以桌宠口吻说一句话，来源标记为 `vision_proactive`
+
+### 6. 联网研究
+
+- 在对话中提及需要实时信息的提问，或直接以 `/search` 开头，会触发 `web.research` 节点联网检索
+- 默认最多 3 轮检索、每轮 2 个 query、总预算 15 秒；结果附来源
+- daemon 不可用或检索失败时按 `failure_policy=continue` 降级为普通对话（回答中会说明未联网）
+
+### 7. 常见调整（常用入口速查）
+
+| 想调整什么 | 改哪里 |
+|---|---|
+| 桌宠性格/人设 | 根目录 `context.md` |
+| 主动说话的频率/内容 | `agent_dag_structure.json` 的 `proactive_topic` 节点（`enabled` / `min_interval_ms` / `dedup_window_ms` / `instruction`） |
+| 视觉识别描述方式 | 同一文件 `vision_llm` 节点的 `config.prompt` |
+| 对话温度/长度 | 同一文件 `call_llm` 节点（`temperature` / `max_tokens` 等） |
+| 联网检索强度 | 同一文件 `web_research` 节点（轮数/query 数/预算） |
+| 文本/视觉模型与 API Key | `llm_config.json` / `vision_llm_config.json` |
+| TTS 音色与参考音频 | `tts_config.json` |
+
+所有 JSON 修改重启程序生效。另见[提示词修改指南](#5-提示词修改指南)。
+
+### 8. 退出
+
+当前未提供图形化退出入口，直接结束 `VPet` 进程即可；退出时会自动停止随进程拉起的 TTS 服务。
 
 ---
 
