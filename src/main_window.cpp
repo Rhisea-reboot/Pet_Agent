@@ -10,9 +10,13 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QMenu>
+#include <QStyle>
+#include <QSystemTrayIcon>
 #include <QPixmapCache>
 #include <QScreen>
 
@@ -43,11 +47,14 @@ MainWindow::MainWindow(QWidget *parent)
     , m_chatBubbleWindow(nullptr)
     , m_perceptionPipeline(nullptr)
     , m_voiceInputManager(nullptr)
+    , m_trayIcon(nullptr)
+    , m_trayMenu(nullptr)
     , m_agentRuntime(nullptr)
     , m_currentImageSize()
     , m_lastFramePath()
     , m_isVoiceHotkeyRegistered(false)
     , m_isScreenPerceptionEnabled(false)
+    , m_isExiting(false)
 {
     setWindowFlags(Qt::FramelessWindowHint
                    | Qt::WindowStaysOnTopHint
@@ -78,7 +85,22 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_trayIcon != nullptr)
+    {
+        m_trayIcon->hide();
+        m_trayIcon->setContextMenu(nullptr);
+        delete m_trayIcon;
+        m_trayIcon = nullptr;
+    }
+
+    if (m_trayMenu != nullptr)
+    {
+        delete m_trayMenu;
+        m_trayMenu = nullptr;
+    }
+
     UnregisterVoiceHotkey();
+    delete m_chatBubbleWindow;
     delete m_voiceInputManager;
     delete m_perceptionPipeline;
     delete m_controller;
@@ -170,6 +192,8 @@ bool MainWindow::Initialize(const QString &animationBasePath)
     {
         OnFrameChanged(framePath);
     }
+
+    InitializeSystemTrayIcon();
 
     return true;
 }
@@ -643,16 +667,12 @@ void MainWindow::OnAgentLlmRequestFailed(int requestId, const QString &message, 
 
 void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
 {
-    if (m_voiceInputManager == nullptr)
-    {
-        return;
-    }
-
     QMenu menu(this);
     QAction *voiceInputAction = menu.addAction(QStringLiteral("Ctrl+Alt+V 语音输入"));
 
     if (voiceInputAction != nullptr)
     {
+        voiceInputAction->setEnabled(m_voiceInputManager != nullptr);
         connect(voiceInputAction, &QAction::triggered, this, &MainWindow::ToggleVoiceRecording);
     }
 
@@ -721,7 +741,128 @@ void MainWindow::ShowPetContextMenu(const QPoint &globalPosition)
         }
     }
 
+    menu.addSeparator();
+
+    QAction *exitAction = menu.addAction(QStringLiteral("退出程序"));
+
+    if (exitAction != nullptr)
+    {
+        connect(exitAction, &QAction::triggered,
+                this, &MainWindow::RequestApplicationExit);
+    }
+
     menu.exec(globalPosition);
+}
+
+void MainWindow::RequestApplicationExit()
+{
+    if (m_isExiting)
+    {
+        return;
+    }
+
+    m_isExiting = true;
+
+    hide();
+
+    if (m_chatBubbleWindow != nullptr)
+    {
+        m_chatBubbleWindow->hide();
+    }
+
+    if (m_trayIcon != nullptr)
+    {
+        m_trayIcon->hide();
+    }
+
+    UnregisterVoiceHotkey();
+
+    if ((m_voiceInputManager != nullptr) && m_voiceInputManager->IsRecording())
+    {
+        m_voiceInputManager->StopRecording();
+    }
+
+    if (m_perceptionPipeline != nullptr)
+    {
+        m_perceptionPipeline->Stop();
+    }
+
+    m_isScreenPerceptionEnabled = false;
+    UpdatePerceptionIndicator();
+    QCoreApplication::quit();
+}
+
+void MainWindow::InitializeSystemTrayIcon()
+{
+    if (m_trayIcon != nullptr)
+    {
+        return;
+    }
+
+    if (!QSystemTrayIcon::isSystemTrayAvailable())
+    {
+        qWarning() << "[Tray] System tray is not available.";
+        return;
+    }
+
+    m_trayMenu = new QMenu(this);
+    QAction *showAction = m_trayMenu->addAction(QStringLiteral("显示桌宠"));
+
+    if (showAction != nullptr)
+    {
+        connect(showAction, &QAction::triggered, this, [this]()
+        {
+            show();
+            raise();
+            activateWindow();
+        });
+    }
+
+    m_trayMenu->addSeparator();
+
+    QAction *exitAction = m_trayMenu->addAction(QStringLiteral("退出程序"));
+
+    if (exitAction != nullptr)
+    {
+        connect(exitAction, &QAction::triggered,
+                this, &MainWindow::RequestApplicationExit);
+    }
+
+    QIcon trayIcon;
+
+    if (!m_lastFramePath.isEmpty())
+    {
+        trayIcon = QIcon(m_lastFramePath);
+    }
+
+    if (trayIcon.isNull())
+    {
+        trayIcon = QApplication::windowIcon();
+    }
+
+    if (trayIcon.isNull())
+    {
+        trayIcon = QApplication::style()->standardIcon(QStyle::SP_ComputerIcon);
+    }
+
+    m_trayIcon = new QSystemTrayIcon(trayIcon, this);
+    m_trayIcon->setToolTip(QStringLiteral("VPet"));
+    m_trayIcon->setContextMenu(m_trayMenu);
+
+    connect(m_trayIcon, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason)
+    {
+        if (reason != QSystemTrayIcon::DoubleClick)
+        {
+            return;
+        }
+
+        show();
+        raise();
+        activateWindow();
+    });
+
+    m_trayIcon->show();
 }
 
 void MainWindow::SetScreenPerceptionEnabled(bool enabled)

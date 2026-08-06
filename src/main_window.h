@@ -10,6 +10,9 @@
 #include <QPoint>
 #include <QWidget>
 
+class QMenu;
+class QSystemTrayIcon;
+
 namespace vpet
 {
 
@@ -207,6 +210,18 @@ private:
     void ShowPetContextMenu(const QPoint &globalPosition);
 
     /**
+     * @brief 请求应用程序退出
+     *
+     * 停止窗口层管理的异步资源后，请求 Qt 事件循环正常返回。
+     */
+    void RequestApplicationExit();
+
+    /**
+     * @brief 初始化系统托盘图标和菜单
+     */
+    void InitializeSystemTrayIcon();
+
+    /**
      * @brief 切换屏幕感知（截图）开关
      * @param[in] enabled 是否启用
      */
@@ -258,11 +273,14 @@ private:
     ChatBubbleWindow *m_chatBubbleWindow; ///< 聊天气泡窗口（独立顶层窗口）
     PerceptionPipeline *m_perceptionPipeline; ///< 视觉感知管道
     VoiceInputManager *m_voiceInputManager; ///< 按键语音输入管理器
+    QSystemTrayIcon *m_trayIcon;        ///< 系统托盘图标
+    QMenu *m_trayMenu;                  ///< 系统托盘菜单
     AgentRuntime *m_agentRuntime;          ///< Agent 运行时对象，不持有所有权
     QSize m_currentImageSize;             ///< 当前图片尺寸
     QString m_lastFramePath;              ///< 最近一次已加载的帧路径（避免重复磁盘 I/O）
     bool m_isVoiceHotkeyRegistered;        ///< 系统全局语音热键是否已注册
     bool m_isScreenPerceptionEnabled;      ///< 屏幕感知（截图上传）是否开启，默认关闭
+    bool m_isExiting;                      ///< 是否已经请求应用程序退出
 };
 
 } // namespace vpet
