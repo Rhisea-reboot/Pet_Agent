@@ -217,6 +217,7 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - network error:" << reply->errorString();
         qDebug() << "[TTS]   server response bytes:" << errorBody.size();
+        qDebug() << "[TTS]   server response:" << QString::fromUtf8(errorBody);
         emit SynthesisFinished(QString());
         return;
     }
@@ -225,7 +226,8 @@ void TtsClient::OnReplyFinished(QNetworkReply *reply)
     {
         const QByteArray errorBody = reply->readAll();
         qDebug() << "[TTS]   FAILED - HTTP" << statusCode
-                 << "response bytes:" << errorBody.size();
+                  << "response bytes:" << errorBody.size();
+        qDebug() << "[TTS]   server response:" << QString::fromUtf8(errorBody);
         emit SynthesisFinished(QString());
         return;
     }

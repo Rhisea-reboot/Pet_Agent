@@ -11,6 +11,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcessEnvironment>
+#include <QUuid>
 
 namespace vpet
 {
@@ -31,6 +32,7 @@ TtsServerManager::TtsServerManager(QObject *parent)
     , m_apiScriptPath()
     , m_workingDirectory()
     , m_apiArgs()
+    , m_instanceId()
     , m_healthCheckCount(0)
     , m_isReady(false)
 {
@@ -110,6 +112,8 @@ bool TtsServerManager::Start(const QString &configPath)
 
     // 设置 PYTHONPATH 确保优先使用本地 tools/ 和 GPT_SoVITS/
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    m_instanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    env.insert(QStringLiteral("VPET_TTS_INSTANCE_ID"), m_instanceId);
     const QString pythonPath = m_workingDirectory
                                + QStringLiteral(";")
                                + m_workingDirectory
@@ -351,8 +355,10 @@ bool TtsServerManager::LoadServerConfig(const QString &configPath)
 
     m_workingDirectory = gptSovitsDir;
 
-    m_pythonExePath = QDir(gptSovitsDir)
-                      .absoluteFilePath(QStringLiteral("runtime/python.exe"));
+    const QDir runtimeDir(QDir(gptSovitsDir).absoluteFilePath(QStringLiteral("runtime")));
+    const QString legacyPythonPath = runtimeDir.absoluteFilePath(QStringLiteral("python.exe"));
+    const QString venvPythonPath = runtimeDir.absoluteFilePath(QStringLiteral("Scripts/python.exe"));
+    m_pythonExePath = QFileInfo::exists(legacyPythonPath) ? legacyPythonPath : venvPythonPath;
 
     m_apiScriptPath = QDir(gptSovitsDir)
                       .absoluteFilePath(QStringLiteral("api_v2.py"));
@@ -420,7 +426,7 @@ void TtsServerManager::PerformHealthCheck()
 {
     QNetworkAccessManager *networkManager = new QNetworkAccessManager(this);
 
-    QNetworkRequest request(QUrl(m_serverUrl + QStringLiteral("/docs")));
+    QNetworkRequest request(QUrl(m_serverUrl + QStringLiteral("/health")));
     request.setTransferTimeout(HTTP_TIMEOUT_MS);
 
     QNetworkReply *reply = networkManager->get(request);
@@ -433,11 +439,25 @@ void TtsServerManager::PerformHealthCheck()
         const int statusCode = reply->attribute(
                                    QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
+        const QByteArray responseBody = reply->readAll();
+
         if (reply->error() == QNetworkReply::NoError)
         {
             if ((m_serverProcess == nullptr)
                 || (m_serverProcess->state() == QProcess::NotRunning))
             {
+                return;
+            }
+
+            const QJsonDocument responseDocument = QJsonDocument::fromJson(responseBody);
+            const QString responseInstanceId = responseDocument.isObject()
+                                               ? responseDocument.object().value(QStringLiteral("instance_id")).toString()
+                                               : QString();
+
+            if (statusCode != 200 || responseInstanceId != m_instanceId)
+            {
+                qDebug() << "[TTS]   health check#" << m_healthCheckCount
+                         << "reached a different API instance";
                 return;
             }
 
@@ -454,10 +474,8 @@ void TtsServerManager::PerformHealthCheck()
             return;
         }
 
-        // 部分情况下服务器已就绪但 /docs 不可用，尝试 /tts 端点
-        // 只要不是 ConnectionRefusedError 就认为在启动中
         qDebug() << "[TTS]   health check#" << m_healthCheckCount
-                 << "failed:" << reply->errorString();
+                  << "failed:" << reply->errorString();
     });
 }
 

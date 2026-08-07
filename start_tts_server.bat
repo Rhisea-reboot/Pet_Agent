@@ -11,7 +11,13 @@ echo Working directory: %cd%
 echo Server will listen on http://127.0.0.1:9880
 echo.
 
-runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS\configs\tts_infer.yaml
+set "PYTHON=runtime\python.exe"
+if not exist "%PYTHON%" set "PYTHON=runtime\Scripts\python.exe"
+if not exist "%PYTHON%" (
+    echo Python runtime not found.
+    exit /b 1
+)
+"%PYTHON%" api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS\configs\tts_infer.yaml
 
 echo.
 echo Server stopped.

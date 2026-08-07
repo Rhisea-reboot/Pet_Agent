@@ -149,6 +149,7 @@ print(tts_config)
 tts_pipeline = TTS(tts_config)
 
 APP = FastAPI()
+INSTANCE_ID = os.environ.get("VPET_TTS_INSTANCE_ID", "")
 
 
 class TTS_Request(BaseModel):
@@ -176,6 +177,11 @@ class TTS_Request(BaseModel):
     super_sampling: bool = False
     overlap_length: int = 2
     min_chunk_length: int = 16
+
+
+@APP.get("/health")
+async def health_endpoint():
+    return {"instance_id": INSTANCE_ID}
 
 
 def pack_ogg(io_buffer: BytesIO, data: np.ndarray, rate: int):

@@ -30,7 +30,11 @@ from peft import LoraConfig, get_peft_model
 from process_ckpt import get_sovits_version_from_path_fast, load_sovits_new
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from tools.audio_sr import AP_BWE
+try:
+    from tools.audio_sr import AP_BWE
+except ImportError:
+    # The optional super-resolution model is not needed by the v2 default path.
+    AP_BWE = None
 from tools.i18n.i18n import I18nAuto, scan_language_list
 from TTS_infer_pack.text_segmentation_method import splits
 from TTS_infer_pack.TextPreprocessor import TextPreprocessor
@@ -675,6 +679,10 @@ class TTS:
 
     def init_sr_model(self):
         if self.sr_model is not None:
+            return
+        if AP_BWE is None:
+            print(i18n("超分模型组件不可用，因此不进行超分。"))
+            self.sr_model_not_exist = True
             return
         try:
             self.sr_model: AP_BWE = AP_BWE(self.configs.device, DictToAttrRecursive)

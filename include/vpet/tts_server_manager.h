@@ -135,6 +135,7 @@ private:
     QString m_apiScriptPath;            ///< api_v2.py 脚本路径
     QString m_workingDirectory;         ///< 服务器工作目录
     QString m_apiArgs;                  ///< API 启动参数
+    QString m_instanceId;               ///< 当前启动的 API 实例标识
     int m_healthCheckCount;             ///< 已执行健康检查次数
     bool m_isReady;                     ///< 服务器是否就绪
 

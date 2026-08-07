@@ -55,8 +55,8 @@ VPet 应用本体（Qt6/C++）源码仅约 1 MB，但发行时需捆绑 GPT-SoVI
 - `TEMP/ref_audio.wav` 是 **TTS 音色样本（强依赖）**：`tts_config.json:6` 的 `ref_audio_path` 指向它，`TTS.py:1136` 文件不存在即抛错 → `/tts` 全部 400；该文件未入 git、src 无生成代码，删 TEMP 时须排除
 - `pytorch-lightning`、`tensorboard`、`torchmetrics` 是**推理链强依赖**（非训练专属）：`TTS.py:24` 无条件导入 `t2s_lightning_module.py`，其 `:11` `from pytorch_lightning import LightningModule`，阶段 1.3 删"训练相关包"时勿删
 - `sv.py:5-8` 为模块级 import：`sys.path.append(GPT_SoVITS/eres2net)` 后 `from ERes2NetV2 import ERes2NetV2` + `import kaldi`（kaldi 内嵌于 `eres2net/` 代码目录，非 pip 包）；`GPT_SoVITS/eres2net/` 必须保留
-- `runtime/nltk_data` 是中英混读强依赖（`text/english.py:16` `nltk.pos_tag`/TweetTokenizer 需 punkt 数据），重建 venv 时须随 runtime 迁移，否则中英混读报错
-- C++ 侧写死 Python 路径：`tts_server_manager.cpp:354` 与 `voice_input_manager.cpp:342` 均用 `GPT-SoVITS/runtime/python.exe`；重建 venv 若采用标准布局（`Scripts/python.exe`）会导致 TTS/ASR 启动全部失败，必须保持 `runtime/python.exe` 或同步修改 C++
+- `runtime/nltk_data` 中的 `averaged_perceptron_tagger` 是英文前端依赖；实测现有中文与英文回归未使用 `punkt`，但重建时仍须整体迁移已有 `nltk_data`
+- C++ 与启动脚本现优先使用 `GPT-SoVITS/runtime/python.exe`，并回退到标准 venv 的 `runtime/Scripts/python.exe`；重建 runtime 后仍须核对两者至少存在其一
 - `runtime/Lib` 中 torch 占 4.8 GB（含 CUDA 库）；日/韩语前端依赖约 550 MB（`mecab_ko_dic`、`eunjeon`、`pyopenjtalk`、`ipadic`、`wordfreq`）
 - ASR 固定中文（`voice_input_manager.cpp` 中 `ASR_LANGUAGE = "zh"`），`tools/asr/models` 1.13 GB 已是最小中文集（paraformer 848M + 标点 283M + VAD 4M），**无冗余，全部保留**
 - `tools/uvr5`(718M) 为人声分离训练工具，推理不依赖
@@ -82,13 +82,13 @@ VPet 应用本体（Qt6/C++）源码仅约 1 MB，但发行时需捆绑 GPT-SoVI
 
 | # | 操作 | 节省 | 说明 |
 |---|---|---|---|
-| 1.1 | 新建干净 venv，按 `requirements.txt` 安装 api_v2 推理依赖 | ~4 GB | 排除训练/WebUI 依赖；⚠️ 产物布局必须兼容 C++ 侧：`runtime/python.exe` 保持存在（`tts_server_manager.cpp:354` 写死），不能是标准 venv 的 `Scripts/python.exe` |
+| 1.1 | 新建干净 venv，安装已验证的 api_v2 推理依赖集 | ~4 GB | 排除训练/WebUI 依赖；C++ 与启动脚本兼容 `runtime/python.exe` 和标准 venv 的 `runtime/Scripts/python.exe` |
 | 1.2 | 删除日/韩语 TTS 前端依赖：`mecab_ko_dic`(213M)、`eunjeon`(112M)、`pyopenjtalk`(105M)、`ipadic`(50M)、`wordfreq`(57M) | ~550 MB | 中文 TTS/ASR 不依赖（`cleaner.py:37` 延迟 import），需回归验证 |
 | 1.3 | 删除训练/WebUI 相关包：`cmake`(78M)、`gradio`(61M) 等 | ~200 MB | ⚠️ 勿删 `pytorch-lightning`/`tensorboard`/`torchmetrics`——推理链强依赖（`t2s_lightning_module.py:11`） |
 | 1.4 | torch 按目标机选型 | 2.5-4.5 GB | 已确认实际走 `custom` 段（`TTS.py:318` 取 `configs_.get("custom", "v2")`，当前 device: cuda）；`TTS.py:322` 有 CUDA 不可用自动降 CPU 的保护，但纯 CPU 推理显著变慢，默认保留 CUDA 版 ~2.5 GB |
-| 1.5 | 产出 `scripts/rebuild_runtime.ps1` | — | 环境可复现，记录 Python 版本与依赖清单；⚠️ 必须迁移 `runtime/nltk_data`（中英混读 punkt 数据）并保留 `runtime/python.exe` 路径 |
+| 1.5 | 产出 `scripts/rebuild_runtime.ps1` | — | 环境可复现，要求完整 Python 3.9；迁移 `runtime/nltk_data`，并保留兼容的 Python 启动路径 |
 
-**风险**：api_v2.py 与 torch/Python 版本兼容性；重建后必须回归 TTS 发声与 ASR 识别。**重点核对**：① 重建后 `runtime/python.exe` 路径仍被 C++ 侧解析到；② `pytorch-lightning` 链完整；③ `runtime/nltk_data` 已迁移（中英混读回归项）；④ `sv.py` 的 `eres2net/` 代码目录未动。
+**风险**：api_v2.py 与 torch/Python 版本兼容性；重建后必须回归 TTS 发声与 ASR 识别。**重点核对**：① `runtime/python.exe` 或 `runtime/Scripts/python.exe` 存在且可被启动器解析；② `pytorch-lightning` 链完整；③ `runtime/nltk_data` 已迁移（中英混读回归项）；④ `sv.py` 的 `eres2net/` 代码目录未动。
 **验收**：GPT-SoVITS API 启动成功；`/tts` 合成出 wav；`funasr_asr.py` 中文识别正常。
 
 ### 阶段 2：模型权重瘦身（4.2 GB → ~1.3 GB）
@@ -177,15 +177,15 @@ VPet 应用本体（Qt6/C++）源码仅约 1 MB，但发行时需捆绑 GPT-SoVI
 
 ## 6. 验收清单（全部阶段完成后）
 
-- [ ] `ctest` 全绿
+- [ ] `ctest` 全绿（当前机器未发现 Qt6 开发包，待配置 `CMAKE_PREFIX_PATH` 后执行）
 - [ ] 桌宠启动、动画播放正常（PNG 资源完整）
 - [ ] TTS 发声正常（v2 链路，中文 + 中英混读）
 - [ ] 语音输入（ASR 中文）正常
 - [ ] 断网（离线）环境下 TTS 与 ASR 均可用（modelscope 不触发联网下载）
 - [ ] Agent 对话 / Web 搜索功能不受影响
 - [ ] 干净环境安装发行包可完整运行
-- [ ] `git clone` 体积符合预期
-- [ ] `scripts/rebuild_runtime.ps1` 可在新机器复现环境
+- [x] Git 索引不再跟踪 `Animation/` 与已验证的大字典资源；历史清理待团队确认后执行
+- [ ] `scripts/rebuild_runtime.ps1` 可在具备完整 Python 3.9 的新机器复现环境
 
 ---
 
@@ -194,10 +194,10 @@ VPet 应用本体（Qt6/C++）源码仅约 1 MB，但发行时需捆绑 GPT-SoVI
 | 日期 | 阶段 | 状态 |
 |---|---|---|
 | 2026-08-06 | 计划定稿 | 待执行 |
-|  | 阶段 0 本地清理 |  |
-|  | 阶段 1 运行时重建 |  |
-|  | 阶段 2 模型瘦身 |  |
-|  | 阶段 3 tools 瘦身 |  |
-|  | 阶段 4 字典裁剪 |  |
-|  | 阶段 5 发行脚本 |  |
-|  | 阶段 6 Git 减负 |  |
+| 2026-08-07 | 阶段 0 本地清理 | 已完成：`build/` 已备份后删除；`TEMP/ref_audio.wav` 已保留 |
+| 2026-08-07 | 阶段 1 运行时重建 | 脚本已实现；当前仅有嵌入式 Python 3.9 和系统 Python 3.14，待完整 Python 3.9 环境执行 |
+| 2026-08-07 | 阶段 2 模型瘦身 | 已完成：v4、v2Pro、BigVGAN v3 权重已备份后删除；`sv` 权重保留 |
+| 2026-08-07 | 阶段 3 tools 瘦身 | 已完成：UVR5、AP_BWE 已备份后删除；默认 v2 TTS 降级兼容；ASR 本地模型不再联网检查 |
+| 2026-08-07 | 阶段 4 字典裁剪 | 已完成：日语用户词典、韩语词典与 `eunjeon` 已备份后删除；`wordfreq`、`ipadic` 经回归确认必须保留 |
+| 2026-08-07 | 阶段 5 发行脚本 | 已实现：构建、运行时自检与 Inno Setup 脚本；待 Qt6 环境执行 |
+| 2026-08-07 | 阶段 6 Git 减负 | 已完成索引移除与忽略规则；未执行历史重写或 `git gc --prune=now` |

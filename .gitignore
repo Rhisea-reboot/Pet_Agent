@@ -1,5 +1,7 @@
 build/
 build-*/
+packaging/out/
+Animation/
 CMakeLists.txt.user
 *.user
 *.exe
@@ -40,6 +42,15 @@ GPT-SoVITS/SoVITS_weights_v2ProPlus/
 GPT-SoVITS/SoVITS_weights_v3/
 GPT-SoVITS/SoVITS_weights_v4/
 GPT-SoVITS/GPT_SoVITS/pretrained_models/
+GPT-SoVITS/GPT_SoVITS/text/ja_userdic/
+GPT-SoVITS/GPT_SoVITS/text/cmudict-fast.rep
+GPT-SoVITS/GPT_SoVITS/text/cmudict.rep
+GPT-SoVITS/GPT_SoVITS/text/cmudict_cache.pickle
+GPT-SoVITS/GPT_SoVITS/text/engdict-hot.rep
+GPT-SoVITS/GPT_SoVITS/text/engdict_cache.pickle
+GPT-SoVITS/GPT_SoVITS/text/g2pw/polyphonic-fix.rep
+GPT-SoVITS/GPT_SoVITS/text/g2pw/polyphonic.pickle
+GPT-SoVITS/GPT_SoVITS/text/g2pw/polyphonic.rep
 GPT-SoVITS/GPT_SoVITS/__pycache__/
 GPT-SoVITS/GPT_SoVITS/**/__pycache__/
 GPT-SoVITS/__pycache__/

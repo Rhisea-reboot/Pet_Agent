@@ -340,6 +340,7 @@ QString VoiceInputManager::FindPythonExecutable() const
     const QStringList candidatePaths =
     {
         QDir(gptSoVitsRootPath).filePath(QStringLiteral("runtime/python.exe")),
+        QDir(gptSoVitsRootPath).filePath(QStringLiteral("runtime/Scripts/python.exe")),
         QStringLiteral("python")
     };
 
